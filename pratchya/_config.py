@@ -6,7 +6,7 @@ import jax.numpy as jnp
 
 @dataclass
 class PratchyaConfig:
-    vocab_size: int = 80_300
+    vocab_size: int = 82369
     hidden_size: int = 128
     intermediate_size: int = 128*4
     lora_rank: int = 32
