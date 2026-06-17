@@ -1,7 +1,5 @@
-from flax.struct import dataclass, field
-from flax import struct
+from flax.struct import dataclass
 from jax.typing import DTypeLike, ArrayLike
-import jax.numpy as jnp
 
 
 @dataclass
@@ -21,6 +19,7 @@ class PratchyaConfig:
     lora_dtype: str = "float32"
     gemm_dtype: str = "float8_e4m3fn"
     dtype: str = "float8_e4m3fn"
+    block_size: int = 128
 
     # RoPE
     use_rope: bool = True

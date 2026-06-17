@@ -5,15 +5,15 @@ from jax.typing import ArrayLike, DTypeLike
 from typing import Optional, Union
 from ._config import PratchyaConfig, PratchyaOutput, PratchyaState
 from ._kernel import block_quantize
-from ._utils import dequantize_cast
+from ._utils import dequantize_cast, compute_loss
 
 
 def lerp(i: ArrayLike, j: ArrayLike, w: ArrayLike):
     return i + (j - i) * w
 
 def normalized(x: ArrayLike, *, axis: int, ord: int = 2, eps: float = 1e-12) -> ArrayLike:
-    x_norm = jnp.linalg.norm(x, ord=ord, axis=axis, keepdims=True)
-    x = x / jnp.maximum(x_norm, eps)
+    x_norm = jnp.sqrt(jnp.sum(jnp.square(x), axis=axis, keepdims=True) + eps**2)
+    x = x / x_norm
     return x
 
 class ScaledWordEmbedding(nnx.Embed):
@@ -34,8 +34,6 @@ class ScaledWordEmbedding(nnx.Embed):
     def __call__(self, inputs: ArrayLike):
         return super().__call__(inputs) * self.embed_scaled
 
-from ._kernel._opt import rmsnorm_quantize
-
 class RMSNorm(nnx.Module):
     def __init__(
         self, hidden_size, *, 
@@ -44,13 +42,16 @@ class RMSNorm(nnx.Module):
         self.epsilon = epsilon
         self.scale = nnx.Param(jnp.ones(hidden_size, jnp.float32))
 
-    def __call__(self, x: ArrayLike, x_s: ArrayLike):
-        x, x_s = rmsnorm_quantize(
-            x, x_s, 
-            self.scale.get_value(), 
-            eps=self.epsilon
-        )
-        return x, x_s
+    def __call__(self, x: ArrayLike, x_sc: ArrayLike):
+
+        block_size = x.shape[-1] // x_sc.shape[-1]
+
+        x = dequantize_cast(x, x_sc, dtype=jnp.float32)
+        inv_rms = jax.lax.rsqrt(jnp.average(jnp.square(x), axis=-1, keepdims=True) + self.epsilon)
+        x = x * inv_rms * self.scale
+        x, x_sc = block_quantize(x, block_size)
+
+        return x, x_sc
 
 class LowRankFFN(nnx.Module):
     def __init__(
@@ -166,6 +167,7 @@ class TimeMix(nnx.Module):
 
         self.rotary_emb = RotaryEmbedding(config)
         self.use_rope = config.use_rope
+        self.block_size = config.block_size
 
     def __call__(self, x: ArrayLike, x_sc: ArrayLike, v_prime_0: ArrayLike, t_positions: ArrayLike, state: PratchyaState):
         B, T, C, = x.shape
@@ -181,8 +183,8 @@ class TimeMix(nnx.Module):
         tm_state = x[:, -1:, :]
         tm_state_sc = x_sc[:, -1:, :]
 
-        _x = x.astype(jnp.bfloat16) * x_sc
-        _x_shifted = x_shifted.astype(jnp.bfloat16) * x_shifted_sc
+        _x = dequantize_cast(x, x_sc, dtype=jnp.bfloat16)
+        _x_shifted = dequantize_cast(x_shifted, x_shifted_sc, dtype=jnp.bfloat16)
 
         x_mu = _x + jnp.einsum('mC,BTC->mBTC', self.mu.get_value().astype(_x.dtype), _x_shifted - _x, preferred_element_type=_x.dtype)
 
@@ -244,11 +246,11 @@ class TimeMix(nnx.Module):
         bonus = bonus.reshape(B, T, C)
         out = (out + bonus) * gate
 
-        out, out_sc = block_quantize(out)
+        out, out_sc = block_quantize(out, self.block_size)
         b = out.shape[-1] // out_sc.shape[-1]
         out = out.reshape(B, T, -1, b)
 
-        w_o, w_o_sc = block_quantize(self.w_output.kernel.get_value().T)
+        w_o, w_o_sc = block_quantize(self.w_output.kernel.get_value().T, self.block_size)
         d = w_o.shape[0]
         w_o = w_o.T.reshape(-1, b, d)
 
@@ -288,7 +290,8 @@ class ChannelMix(nnx.Module):
         self.mu_x = nnx.Param(jnp.ones(config.hidden_size, dtype=config.mu_dtype) * 0.5)
 
         self.hidden_size = config.hidden_size
-        self.inter_size = config.intermediate_size        
+        self.inter_size = config.intermediate_size
+        self.block_size = config.block_size        
 
     def __call__(self, x: ArrayLike, x_sc: ArrayLike, state: PratchyaState):
         
@@ -312,20 +315,20 @@ class ChannelMix(nnx.Module):
         _x_shifted = dequantize_cast(x_shifted, x_shifted_sc, dtype=jnp.bfloat16)
 
         x_k = lerp(_x, _x_shifted, self.mu_x.get_value().astype(_x.dtype))
-        x_k, x_k_sc = block_quantize(x_k)
+        x_k, x_k_sc = block_quantize(x_k, self.block_size)
         x_k = x_k.reshape(B, T, n, b)
 
-        w_k, w_k_sc = block_quantize(self.w_k.kernel.get_value().T)
+        w_k, w_k_sc = block_quantize(self.w_k.kernel.get_value().T, self.block_size)
         w_k = w_k.T.reshape(n, b, I)
 
         k = jnp.einsum('atnb,nbi->atni', x_k, w_k, preferred_element_type=jnp.bfloat16)
         k = k * x_k_sc[..., None] * w_k_sc.T[None, None, ...]
         k = jnp.sum(k, axis=2)
         k = jnp.pow(jax.nn.relu(k), 2)
-        k, k_sc = block_quantize(k)
+        k, k_sc = block_quantize(k, self.block_size)
         k = k.reshape(B, T, N, b)
 
-        w_v, w_v_sc = block_quantize(self.w_v.kernel.get_value().T)
+        w_v, w_v_sc = block_quantize(self.w_v.kernel.get_value().T, self.block_size)
         w_v = w_v.T.reshape(N, b, C)
 
         v = jnp.einsum('atnb,nbc->atnc', k, w_v, preferred_element_type=jnp.bfloat16)
@@ -384,6 +387,8 @@ class RWKVBlock(nnx.Module):
             epsilon=config.rmsnorm_epsilon, 
         )
 
+        self.block_size = config.block_size
+
     def __call__(
         self, x: ArrayLike, 
         x_sc: ArrayLike, 
@@ -395,12 +400,12 @@ class RWKVBlock(nnx.Module):
         x, x_sc = self.pre_timemix_rmsnorm(x, x_sc)
         dx, v_0, state = self.timemix(x, x_sc, v_0, t_positions, state)
         x = dequantize_cast(x, x_sc, dtype=dx.dtype) + dx
-        x, x_sc = block_quantize(x)
+        x, x_sc = block_quantize(x, self.block_size)
         
         x, x_sc = self.pre_channelmix_rmsnorm(x, x_sc)
         dx, state = self.channelmix(x, x_sc, state)
         x = dequantize_cast(x, x_sc, dtype=dx.dtype) + dx
-        x, x_sc = block_quantize(x)
+        x, x_sc = block_quantize(x, self.block_size)
 
         state = state.replace(layer_idx=state.layer_idx + 1)
         
@@ -447,6 +452,7 @@ class PratchyaModel(nnx.Module):
         self.head_dim = config.head_dim
         self.n_head = self.hidden_size // self.head_dim
         self.use_rope = config.use_rope
+        self.block_size = config.block_size
 
     def __call__(self, input_ids: ArrayLike, state: PratchyaState):
 
@@ -455,9 +461,9 @@ class PratchyaModel(nnx.Module):
 
         if state is None:
             tm_state = jnp.zeros((self.n_layers, B, 1, C))
-            tm_state, tm_state_sc = block_quantize(tm_state)
+            tm_state, tm_state_sc = block_quantize(tm_state, self.block_size)
             cm_state = jnp.zeros((self.n_layers, B, 1, C))
-            cm_state, cm_state_sc = block_quantize(cm_state)
+            cm_state, cm_state_sc = block_quantize(cm_state, self.block_size)
             wkv_state = jnp.zeros((self.n_layers, B, self.n_head, self.head_dim, self.head_dim), dtype=jnp.float32)
             step = jnp.array(0, dtype=jnp.int32)
 
@@ -476,7 +482,7 @@ class PratchyaModel(nnx.Module):
             t_positions = None
 
         x = self.embed_tokens(input_ids)
-        x, x_sc = block_quantize(x)
+        x, x_sc = block_quantize(x, self.block_size)
         x, x_sc = self.pre_rmsnorm(x, x_sc)
         
         x, x_sc, v, state = self.init_layer(x, x_sc, None, t_positions, state)
@@ -520,8 +526,12 @@ class PratchyaCausalLM(nnx.Module):
         x = dequantize_cast(x, x_sc, dtype=self.lm_head.dtype)
         logits = self.lm_head(x)
 
+        loss = jnp.array(0.0)
+        if label is not None:
+            loss = compute_loss(logits[:, :-1, :], label[:, 1:])
+
         return PratchyaOutput(
             logits=logits,
-            loss=None,
+            loss=loss,
             state=state
         )

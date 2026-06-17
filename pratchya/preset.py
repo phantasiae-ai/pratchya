@@ -2,6 +2,16 @@
 
 from ._config import PratchyaConfig
 
+PratchyaDummyConfig = PratchyaConfig( # dummy config for test
+    vocab_size = 120,
+    hidden_size = 32,
+    intermediate_size = 64,
+    lora_rank = 8,
+    head_dim = 8,
+    n_layers = 4,
+    block_size = 4
+)
+
 Pratchya500M = PratchyaConfig(
     hidden_size = 1280,
     intermediate_size = 5120,

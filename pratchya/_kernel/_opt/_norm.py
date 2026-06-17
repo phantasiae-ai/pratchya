@@ -1,6 +1,9 @@
 import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
+from jax.typing import ArrayLike
+from ..._utils import dequantize_cast
+from .._cast import block_quantize
 
 def rmsnorm_quantize_kernel(x_ref, x_scale, gamma_ref, out_fp8_ref, scale_ref, *, block_size, eps=1e-5):
     x_row = x_ref[...]
@@ -26,16 +29,18 @@ def rmsnorm_quantize_kernel(x_ref, x_scale, gamma_ref, out_fp8_ref, scale_ref, *
     out_fp8_ref[...] = x_fp8.reshape(1, -1)
     scale_ref[...] = scale.reshape(1, -1).astype(jnp.bfloat16)
 
-def rmsnorm_quantize(x, x_scale, gamma, block_size=128, eps=1e-5):
+def rmsnorm_quantize(x: ArrayLike, x_scale: ArrayLike, gamma: ArrayLike, eps: float=1e-5):
     
     orig_shape = x.shape
     C = orig_shape[-1]
+    block_size = C // x_scale.shape[-1]
+    
     assert C % block_size == 0, \
         "last dimension can't be divided by block_size"
     
     x_flat = x.reshape(-1, C)
-    x_scale = x_scale.reshape(-1, 1)
     N = x_flat.shape[0]
+    x_scale = x_scale.reshape(N, -1)
     
     grid = (N,)
     
@@ -85,3 +90,55 @@ def rmsnorm_quantize(x, x_scale, gamma, block_size=128, eps=1e-5):
     scales = scales_flat.reshape(*orig_shape[:-1], C // block_size)
     
     return out_fp8, scales
+
+# WHY ...
+@jax.custom_gradient
+def rmsnorm(x: ArrayLike, x_sc: ArrayLike, gamma: ArrayLike, eps: float=1e-5):
+
+    y = rmsnorm_quantize(x, x_sc, gamma, eps)
+
+    def bwd_fn(g, g_sc):
+
+        def rmsnorm_math(x: ArrayLike, x_sc: ArrayLike, gamma: ArrayLike):
+            block_size = x.shape[-1] // x_sc.shape[-1]
+
+            x = dequantize_cast(x, x_sc, dtype=gamma.dtype)
+            inv_rms = jax.lax.rsqrt(jnp.var(x, axis=-1, dtype=gamma.dtype, keepdims=True) + eps)
+            x = x * inv_rms * gamma
+
+            x, x_sc = block_quantize(x, block_size)
+
+            return x, x_sc
+
+        y, pullback = jax.vjp(rmsnorm_math, x, x_sc, gamma)
+        dx, dx_sc, d_gamma = pullback(g, g_sc)
+
+        return dx, dx_sc, d_gamma, None
+
+    return y, bwd_fn 
+
+
+# WHY DID I DO THIS...
+@jax.custom_gradient
+def rmsnorm(x: ArrayLike, x_sc: ArrayLike, gamma: ArrayLike, eps: float=1e-5):
+
+    def rmsnorm_math(x: ArrayLike, x_sc: ArrayLike, gamma: ArrayLike, eps: float):
+        block_size = x.shape[-1] // x_sc.shape[-1]
+
+        x = dequantize_cast(x, x_sc, dtype=gamma.dtype)
+        inv_rms = jax.lax.rsqrt(jnp.var(x, axis=-1, dtype=gamma.dtype, keepdims=True) + eps)
+        x = x * inv_rms * gamma
+
+        x, x_sc = block_quantize(x, block_size)
+
+        return x, x_sc
+
+
+    y, pullback = jax.vjp(rmsnorm_math, x, x_sc, gamma)
+
+    def bwd_fn(g, g_sc):
+        dx, dx_sc, d_gamma = pullback(g, g_sc)
+
+        return dx, dx_sc, d_gamma, None
+
+    return y, bwd_fn 
