@@ -10,8 +10,8 @@ from pratchya import PratchyaCausalLM
 
 import jax.profiler
 
-orig_model = PratchyaCausalLM(PratchyaDummyConfig)
-orig_param = nnx.state(orig_model, nnx.Param).flat_state()
+# orig_model = PratchyaCausalLM(PratchyaDummyConfig)
+# orig_param = nnx.state(orig_model, nnx.Param).flat_state()
 
 model = PratchyaCausalLM(PratchyaDummyConfig)
 
@@ -63,20 +63,20 @@ for _ in range(10):
 
 # --------
 
-param = nnx.state(model, nnx.Param).flat_state()
+# param = nnx.state(model, nnx.Param).flat_state()
 
-n_params = len(param)
-changes = 0
-unchanges = []
+# n_params = len(param)
+# changes = 0
+# unchanges = []
 
-print(f"\nunchange params (disable wd): ")
-for i in range(n_params):
-    orig = orig_param[i][-1].get_value()
-    p = param[i][-1].get_value()
-    if (orig == p).all():
-        print(param[i][0])
-        continue
+# print(f"\nunchange params (disable wd): ")
+# for i in range(n_params):
+#     orig = orig_param[i][-1].get_value()
+#     p = param[i][-1].get_value()
+#     if (orig == p).all():
+#         print(param[i][0])
+#         continue
 
-    changes += 1
+#     changes += 1
 
-print(f"\nchanges: {changes}/{n_params}")
+# print(f"\nchanges: {changes}/{n_params}")

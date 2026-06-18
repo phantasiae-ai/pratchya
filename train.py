@@ -1,7 +1,7 @@
 
 
 from pratchya.optimizer import miulion_optimizer, MiulionHyperParams, MiulionScheduler
-from pratchya.preset import PratchyaDummyConfig
+from pratchya.preset import PratchyaDummyConfig, Pratchya500M
 from pratchya import PratchyaCausalLM
 
 import jax, jax.numpy as jnp
@@ -29,10 +29,10 @@ schedule = MiulionScheduler(
 )
 
 tx = miulion_optimizer(hyperparams, schedule)
-model = PratchyaCausalLM(PratchyaDummyConfig)
+model = PratchyaCausalLM(Pratchya500M)
 optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
 
-@nnx.jit
+# @nnx.jit
 def train_step(model, optimizer, batch):
     def loss_fn(model):
         output = model(batch['input_ids'], batch['input_ids'])

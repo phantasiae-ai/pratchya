@@ -115,7 +115,7 @@ def miulion_optimizer(hyperparams: MiulionHyperParams, scheduler: MiulionSchedul
                 return False
                 
             return True
-        
+
         def update_leaf(path, g: ArrayLike, m: ArrayLike, m_sc: ArrayLike, param):
             orig_shape = g.shape
             orig_size = g.size
