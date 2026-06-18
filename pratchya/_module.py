@@ -4,8 +4,9 @@ import jax
 from jax.typing import ArrayLike, DTypeLike
 from typing import Optional, Union
 from ._config import PratchyaConfig, PratchyaOutput, PratchyaState
-from ._kernel import block_quantize
-from ._utils import dequantize_cast, compute_loss
+# from ._kernel import block_quantize
+
+from ._utils import dequantize_cast, compute_loss, block_quantize
 
 
 def lerp(i: ArrayLike, j: ArrayLike, w: ArrayLike):
@@ -74,7 +75,7 @@ class LowRankFFN(nnx.Module):
             dtype=dtype, param_dtype=param_dtype, 
             preferred_element_type=preferred_element_type
         )
-    
+
     def __call__(self, x: ArrayLike):
         return self.lin2(jax.nn.tanh(self.lin1(x)))
 
@@ -144,9 +145,9 @@ class TimeMix(nnx.Module):
     
         self.decay_lora = LowRankFFN(
             config.hidden_size, config.lora_rank, 
-            rngs=rngs, dtype=config.gemm_dtype, 
+            rngs=rngs, dtype=jnp.bfloat16, 
             param_dtype=config.lora_dtype,
-            preferred_element_type=jnp.bfloat16
+            preferred_element_type=jnp.float32
         )
         self.iclr_lora = LowRankFFN(
             config.hidden_size, config.lora_rank, 
@@ -155,7 +156,7 @@ class TimeMix(nnx.Module):
             preferred_element_type=jnp.bfloat16
         )
         self.iclr_mix_amt = nnx.Param(jnp.ones(config.hidden_size, dtype=config.lora_dtype) * 0.5)
-        self.removal_key_multiplier = nnx.Param(jnp.zeros(config.hidden_size, dtype=config.lora_dtype))
+        self.removal_key_multiplier = nnx.Param(jnp.ones(config.hidden_size, dtype=config.lora_dtype) * 0.5)
         self.bonus_multiplier = nnx.Param(jnp.ones(config.hidden_size, dtype=config.lora_dtype))
 
         self.group_norm = nnx.GroupNorm(
