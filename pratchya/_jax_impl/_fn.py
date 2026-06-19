@@ -4,7 +4,7 @@ import jax, jax.numpy as jnp
 
 from .._config import PratchyaConfig
 
-from ._utils import lerp, linear, lora_ffn, normalized, group_norm
+from ._utils import lerp, linear, lora_ffn, normalized, group_norm, apply_rope
 
 def embed(input_ids: ArrayLike, params: ArrayLike):
     scale = params['w'].shape[-1]
@@ -31,13 +31,24 @@ def rwkv_block(x: ArrayLike, params, *, v0, state, config: PratchyaConfig):
     }
     return x, v0, state
 
+def rwkv_init_block(x: ArrayLike, params, *, state, config: PratchyaConfig):
+    x = rmsnorm(x, params['pre_tm_rmsnorm'])
+    dx, v0, state = tm_init_fwd(x, params['tm'], state=state, config=config)
+    x = x + dx
+    x = rmsnorm(x, params['pre_cm_rmsnorm'])
+    dx, state = cm_fwd(x, params['cm'], state=state)
+    x = x + dx
 
-def tm_fwd(x: ArrayLike, params, *, vprime_0, state, config: PratchyaConfig):
+    state = {
+        **state,
+        'layer_idx': state['layer_idx'] + 1
+    }
+    return x, v0, state
+
+def tm_prepare(layer_idx, x: ArrayLike, params, *, state, config: PratchyaConfig):
     B, T, C = x.shape
     H = config.head_dim
-    N = C // H
-
-    layer_idx = state['layer_idx']
+    
     tm_state = state['tm_state'][layer_idx]
     x_shift = jnp.concat([tm_state, x[:, :-1, :]], axis=1)
     tm_state = x[:, -1:, :]
@@ -63,12 +74,25 @@ def tm_fwd(x: ArrayLike, params, *, vprime_0, state, config: PratchyaConfig):
     gate    = lora_ffn(x_gate, params['gate_lora'])
     iclr    = jax.nn.sigmoid(lora_ffn(x_iclr, params['iclr_lora']))
 
-    def init_condition_fn():
-        v_residual_gate = jax.nn.sigmoid(lora_ffn(x_value, params['nu_lora']))
-        v = lerp(vprime, vprime_0, v_residual_gate)
-        return v
+    # rope
+    k = k.reshape(B, T, -1, H)
+    r = r.reshape(B, T, -1, H)
+
+    t_positions = state['step'] + jnp.arange(T, dtype=jnp.int32)
+
+    k = apply_rope(k, t_positions, state['inv_freq'])
+    r = apply_rope(r, t_positions, state['inv_freq'])
+
+    k = k.reshape(B, T, -1)
+    r = r.reshape(B, T, -1)
     
-    v = jax.lax.cond(layer_idx == 0, lambda: vprime, init_condition_fn)
+    return r, d, k, vprime, gate, iclr, x_value, tm_state
+
+def tm_final(x: ArrayLike, params, r, d, k, v, gate, iclr, wkv_state, *, config: PratchyaConfig):
+    B, T, C = x.shape
+    H = config.head_dim
+    N = C // H
+
     decay = jnp.exp(-jnp.exp(-0.5) * jax.nn.sigmoid(d.astype(jnp.float32)))
     removal_k = k * params['removal_key_multiplier']['w']
     removal_k = normalized(removal_k.reshape(B, T, N, -1), axis=-1).reshape(B, T, -1)
@@ -90,7 +114,7 @@ def tm_fwd(x: ArrayLike, params, *, vprime_0, state, config: PratchyaConfig):
 
         return (wkv_state, t + 1), y.reshape(B, C)
     
-    (wkv_state, _), out = jax.lax.scan(recurent_scan_fn, (state['wkv_state'][layer_idx], 0), None, length=T)
+    (wkv_state, _), out = jax.lax.scan(recurent_scan_fn, (wkv_state, 0), None, length=T)
     out = out.transpose(1, 0, 2)
     out = group_norm(out.reshape(B * T, C), N, params['group_norm']).reshape(B, T, C)
 
@@ -99,6 +123,33 @@ def tm_fwd(x: ArrayLike, params, *, vprime_0, state, config: PratchyaConfig):
     out = (out + bonus) * gate
     out = linear(out, params['w_output'])
 
+    return out, wkv_state
+
+
+def tm_init_fwd(x: ArrayLike, params, *, state, config: PratchyaConfig):
+    layer_idx = state['layer_idx']
+    r, d, k, vprime, gate, iclr, _, tm_state = tm_prepare(layer_idx, x, params, state=state, config=config)
+    v = vprime
+    out, wkv_state = tm_final(x, params, r, d, k, v, gate, iclr, state['wkv_state'][layer_idx], config=config)
+
+    wkv_state = state['wkv_state'].at[layer_idx].set(wkv_state)
+    tm_state = state['tm_state'].at[layer_idx].set(tm_state)
+    state = {
+        **state,
+        'wkv_state': wkv_state,
+        'tm_state': tm_state
+    }
+
+    return out, v, state
+
+
+def tm_fwd(x: ArrayLike, params, *, vprime_0, state, config: PratchyaConfig):
+    layer_idx = state['layer_idx']
+    r, d, k, vprime, gate, iclr, x_value, tm_state = tm_prepare(layer_idx, x, params, state=state, config=config)
+    v_residual_gate = jax.nn.sigmoid(lora_ffn(x_value, params['nu_lora']))
+    v = lerp(vprime, vprime_0, v_residual_gate)
+    out, wkv_state = tm_final(x, params, r, d, k, v, gate, iclr, state['wkv_state'][layer_idx], config=config)
+    
     wkv_state = state['wkv_state'].at[layer_idx].set(wkv_state)
     tm_state = state['tm_state'].at[layer_idx].set(tm_state)
     state = {
@@ -132,7 +183,7 @@ def cm_fwd(x: ArrayLike, params, *, state):
 def fwd_fn(input_ids: ArrayLike, params: dict, *, state, config: PratchyaConfig):
     x = embed(input_ids, params['embed_tokens'])
     x = rmsnorm(x, params['pre_rmsnorm'], eps=config.rmsnorm_epsilon)
-    x, v0, state = rwkv_block(x, params['rwkv_init_block'], v0=0, state=state, config=config)
+    x, v0, state = rwkv_init_block(x, params['rwkv_init_block'], state=state, config=config)
 
     def rwkv_block_scan(carry, params):
         x, v0, state = carry

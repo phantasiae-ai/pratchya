@@ -32,7 +32,7 @@ def init_fn(key, config: PratchyaConfig):
             lin2=init_linear(k2, lora_rank, hidden_size, dtype),
         )
     
-    def tm(k, config: PratchyaConfig):
+    def tm(k, config: PratchyaConfig, init=False):
         k1, k2, k3, k4, k5, k6, k7, k8, k9, k10, k11, k12, k13 = jax.random.split(k, 13)
         layer = dict(
             mu=init_linear(k1, 6, config.hidden_size, jnp.bfloat16),
@@ -42,7 +42,6 @@ def init_fn(key, config: PratchyaConfig):
             w_receptance=init_linear(k5, config.hidden_size, config.hidden_size, jnp.bfloat16),
 
             gate_lora=lora_ffn(k6, config.hidden_size, config.lora_rank, jnp.bfloat16),
-            nu_lora = lora_ffn(k7, config.hidden_size, config.lora_rank, jnp.bfloat16),
             decay_lora=lora_ffn(k8, config.hidden_size, config.lora_rank, jnp.bfloat16),
             iclr_lora=lora_ffn(k9, config.hidden_size, config.lora_rank, jnp.bfloat16),
 
@@ -52,6 +51,9 @@ def init_fn(key, config: PratchyaConfig):
 
             group_norm=init_linear(k13, 1, config.hidden_size, jnp.bfloat16, bias=True),
         )
+
+        if not init:
+            layer['nu_lora'] = lora_ffn(k7, config.hidden_size, config.lora_rank, jnp.bfloat16)
 
         return layer
     
@@ -80,7 +82,7 @@ def init_fn(key, config: PratchyaConfig):
         pre_rmsnorm=init_linear(k2, 1, config.hidden_size, jnp.float32),
         rwkv_init_block=dict(
             pre_tm_rmsnorm=init_linear(k1, 1, config.hidden_size, jnp.float32),
-            tm=tm(k2, config),
+            tm=tm(k2, config, init=True),
             pre_cm_rmsnorm=init_linear(k3, 1, config.hidden_size, jnp.float32),
             cm=cm(k4, config),
         ),
@@ -100,9 +102,15 @@ def init_state(x: ArrayLike, config: PratchyaConfig):
     tm_state = jnp.zeros((L, B, 1, C), dtype=jnp.bfloat16)
     cm_state = jnp.zeros((L, B, 1, C), dtype=jnp.bfloat16)
     wkv_state = jnp.zeros((L, B, N, H, H), dtype=jnp.float32)
+
+    # rope
+    inv_freq = 1.0 / (config.rope_theta ** (jnp.arange(0, H, 2, dtype=jnp.float32) / H))
+
     return dict(
         tm_state=tm_state,
         cm_state=cm_state,
         wkv_state=wkv_state,
-        layer_idx=0
+        layer_idx=0,
+        inv_freq=inv_freq,
+        step=0
     )

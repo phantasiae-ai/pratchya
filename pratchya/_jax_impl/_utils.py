@@ -1,6 +1,7 @@
 
 from jax.typing import ArrayLike
 import jax.numpy as jnp
+from typing import Union
 
 def lora_ffn(x: ArrayLike, params):
     x =  x @ params['lin1']['w']
@@ -42,3 +43,21 @@ def group_norm(x, n_groups, params, eps=1e-5):
     x_out = x_norm.reshape(*shape)
     
     return x_out * params['w'] + params['b']
+
+def apply_rope(x: ArrayLike, t: Union[int, ArrayLike], inv_freq: ArrayLike):
+    t_array = jnp.atleast_1d(t).astype(jnp.float32)
+    freqs = jnp.outer(t_array, inv_freq) # Shape: (Batch or 1, head_dim // 2)
+    
+    emb = jnp.concatenate([freqs, freqs], axis=-1) # Shape: (Batch or 1, head_dim)
+    
+    emb = emb[:, None, :] 
+    cos = jnp.cos(emb)
+    sin = jnp.sin(emb)
+    
+    return (x * cos) + (rotate_half(x) * sin)
+
+def rotate_half(x: ArrayLike):
+    d = x.shape[-1]
+    x1 = x[..., :d//2]
+    x2 = x[..., d//2:]
+    return jnp.concatenate([-x2, x1], axis=-1)

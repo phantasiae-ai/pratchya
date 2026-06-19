@@ -349,9 +349,9 @@ class ChannelMix(nnx.Module):
 
 class RotaryEmbedding(nnx.Module):
     def __init__(self, config: PratchyaConfig):
-        self.head_dim = config.head_dim
+        head_dim = config.head_dim
         base = config.rope_theta
-        self.inv_freq = 1.0 / (base ** (jnp.arange(0, self.head_dim, 2, dtype=jnp.float32) / self.head_dim))
+        self.inv_freq = 1.0 / (base ** (jnp.arange(0, head_dim, 2, dtype=jnp.float32) / head_dim))
 
     def rotate_half(self, x: ArrayLike):
         d = x.shape[-1]

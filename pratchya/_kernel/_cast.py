@@ -12,7 +12,6 @@ from functools import partial
 cpu = os.environ.get('CPU', '1')
 INTERPRET = True if cpu == '1' else False
 
-
 def block_quantize_kernel(x_ref, out_ref, scale_ref):
     x_block = x_ref[...]
     abs_max = jnp.max(jnp.abs(x_block))
