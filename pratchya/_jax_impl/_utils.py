@@ -1,18 +1,17 @@
 
 from jax.typing import ArrayLike
-import jax.numpy as jnp
-from typing import Union
+import jax.numpy as jnp, jax
+from typing import Union, Dict
+from .._kernel._fp8 import ArrayFP8
 
-def lora_ffn(x: ArrayLike, params):
-    x =  x @ params['lin1']['w']
+def lora_ffn(x: ArrayFP8, params: Dict):
+    x = x @ params['lin1']['w']
+    x = x.apply(lambda x: jax.nn.silu(x))
     x = x @ params['lin2']['w']
     return x
 
-def linear(x: ArrayLike, params):
+def linear(x: ArrayFP8, params: Dict):
     x =  x @ params['w']
-    if 'b' in params:
-        x = x + params['b']
-
     return x
 
 def lerp(a: ArrayLike, b: ArrayLike, w: ArrayLike):
@@ -20,11 +19,15 @@ def lerp(a: ArrayLike, b: ArrayLike, w: ArrayLike):
     return x
 
 def normalized(x: ArrayLike, *, axis: int, eps: float = 1e-12) -> ArrayLike:
+    if hasattr(x, 'apply'):
+        return x.apply(lambda v: v / jnp.sqrt(jnp.sum(jnp.square(v), axis=axis, keepdims=True) + eps**2))
     x_norm = jnp.sqrt(jnp.sum(jnp.square(x), axis=axis, keepdims=True) + eps**2)
     x = x / x_norm
     return x
 
 def group_norm(x, n_groups, params, eps=1e-5):
+    if hasattr(x, 'apply'):
+        return x.apply(lambda v: group_norm(v, n_groups, params, eps))
     shape = x.shape
     N = shape[0]
     C = shape[-1]
@@ -60,4 +63,6 @@ def rotate_half(x: ArrayLike):
     d = x.shape[-1]
     x1 = x[..., :d//2]
     x2 = x[..., d//2:]
+    if hasattr(x, 'concat'):
+        return x.__class__.concat([-x2, x1], axis=-1)
     return jnp.concatenate([-x2, x1], axis=-1)

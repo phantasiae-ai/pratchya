@@ -1,2 +1,2 @@
 from ._config import PratchyaConfig
-from ._module import PratchyaCausalLM
+from ._nnx_impl._module import PratchyaCausalLM

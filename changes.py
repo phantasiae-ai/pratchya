@@ -2,7 +2,7 @@
 
 import jax, jax.numpy as jnp
 from flax import nnx
-from pratchya.optimizer import miulion_optimizer, MiulionHyperParams, MiulionScheduler
+from pratchya._nnx_impl._optimizer import miulion_optimizer, MiulionHyperParams, MiulionScheduler
 import optax
 
 from pratchya.preset import PratchyaDummyConfig

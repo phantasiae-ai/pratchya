@@ -18,6 +18,7 @@ Pratchya500M = PratchyaConfig(
     lora_rank = 128,
     head_dim = 64,
     n_layers = 16,
+    block_size=16
 )
 
 Pratchya1B = PratchyaConfig(
@@ -25,7 +26,8 @@ Pratchya1B = PratchyaConfig(
     intermediate_size = 8192,
     lora_rank = 128,
     head_dim = 128,
-    n_layers = 16
+    n_layers = 16,
+    block_size=16
 )
 
 Pratchya3B = PratchyaConfig(
@@ -34,6 +36,7 @@ Pratchya3B = PratchyaConfig(
     lora_rank = 256,
     head_dim = 128,
     n_layers = 22,
+    block_size=16
 )
 
 Pratchya7B = PratchyaConfig(
@@ -42,4 +45,5 @@ Pratchya7B = PratchyaConfig(
     lora_rank = 256,
     head_dim = 256,
     n_layers = 32,
+    block_size=32
 )

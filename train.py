@@ -1,6 +1,6 @@
 
 
-from pratchya.optimizer import miulion_optimizer, MiulionHyperParams, MiulionScheduler
+from pratchya._nnx_impl._optimizer import miulion_optimizer, MiulionHyperParams, MiulionScheduler
 from pratchya.preset import PratchyaDummyConfig, Pratchya500M
 from pratchya import PratchyaCausalLM
 

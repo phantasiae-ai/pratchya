@@ -18,11 +18,11 @@ def rmsnorm(x: ArrayLike, params: ArrayLike, *, eps: float = 1e-6):
 
 
 def rwkv_block(x: ArrayLike, params, *, v0, state, config: PratchyaConfig):
-    x = rmsnorm(x, params['pre_tm_rmsnorm'])
-    dx, v0, state = tm_fwd(x, params['tm'], vprime_0=v0, state=state, config=config)
+    x_rmsnorm = x.apply(lambda v: rmsnorm(v, params['pre_tm_rmsnorm'])) if hasattr(x, 'apply') else rmsnorm(x, params['pre_tm_rmsnorm'])
+    dx, v0, state = tm_fwd(x_rmsnorm, params['tm'], vprime_0=v0, state=state, config=config)
     x = x + dx
-    x = rmsnorm(x, params['pre_cm_rmsnorm'])
-    dx, state = cm_fwd(x, params['cm'], state=state)
+    x_rmsnorm2 = x.apply(lambda v: rmsnorm(v, params['pre_cm_rmsnorm'])) if hasattr(x, 'apply') else rmsnorm(x, params['pre_cm_rmsnorm'])
+    dx, state = cm_fwd(x_rmsnorm2, params['cm'], state=state)
     x = x + dx
 
     state = {
@@ -32,11 +32,11 @@ def rwkv_block(x: ArrayLike, params, *, v0, state, config: PratchyaConfig):
     return x, v0, state
 
 def rwkv_init_block(x: ArrayLike, params, *, state, config: PratchyaConfig):
-    x = rmsnorm(x, params['pre_tm_rmsnorm'])
-    dx, v0, state = tm_init_fwd(x, params['tm'], state=state, config=config)
+    x_rmsnorm = x.apply(lambda v: rmsnorm(v, params['pre_tm_rmsnorm'])) if hasattr(x, 'apply') else rmsnorm(x, params['pre_tm_rmsnorm'])
+    dx, v0, state = tm_init_fwd(x_rmsnorm, params['tm'], state=state, config=config)
     x = x + dx
-    x = rmsnorm(x, params['pre_cm_rmsnorm'])
-    dx, state = cm_fwd(x, params['cm'], state=state)
+    x_rmsnorm2 = x.apply(lambda v: rmsnorm(v, params['pre_cm_rmsnorm'])) if hasattr(x, 'apply') else rmsnorm(x, params['pre_cm_rmsnorm'])
+    dx, state = cm_fwd(x_rmsnorm2, params['cm'], state=state)
     x = x + dx
 
     state = {
@@ -50,7 +50,15 @@ def tm_prepare(layer_idx, x: ArrayLike, params, *, state, config: PratchyaConfig
     H = config.head_dim
     
     tm_state = state['tm_state'][layer_idx]
-    x_shift = jnp.concat([tm_state, x[:, :-1, :]], axis=1)
+    if hasattr(tm_state, 'concat'):
+        x_fp8 = tm_state.__class__(x, tm_state.block_grid)
+        x_prev_fp8 = tm_state.__class__(x[:, :-1, :], tm_state.block_grid)
+        x_shift = tm_state.__class__.concat([tm_state, x_prev_fp8], axis=1)
+        x_to_lerp = x_fp8
+    else:
+        x_shift = jnp.concat([tm_state, x[:, :-1, :]], axis=1)
+        x_to_lerp = x
+        
     tm_state = x[:, -1:, :]
 
     mu_r = params['mu']['w'][0]
@@ -60,19 +68,21 @@ def tm_prepare(layer_idx, x: ArrayLike, params, *, state, config: PratchyaConfig
     mu_a = params['mu']['w'][4]
     mu_g = params['mu']['w'][5]
 
-    x_receptance    = lerp(x, x_shift, mu_r)
-    x_decay         = lerp(x, x_shift, mu_d)
-    x_key           = lerp(x, x_shift, mu_k)
-    x_value         = lerp(x, x_shift, mu_v)
-    x_iclr          = lerp(x, x_shift, mu_a)
-    x_gate          = lerp(x, x_shift, mu_g)
+    x_receptance    = lerp(x_to_lerp, x_shift, mu_r)
+    x_decay         = lerp(x_to_lerp, x_shift, mu_d)
+    x_key           = lerp(x_to_lerp, x_shift, mu_k)
+    x_value         = lerp(x_to_lerp, x_shift, mu_v)
+    x_iclr          = lerp(x_to_lerp, x_shift, mu_a)
+    x_gate          = lerp(x_to_lerp, x_shift, mu_g)
 
     r       = linear(x_receptance, params['w_receptance'])
     d       = lora_ffn(x_decay, params['decay_lora'])
     k       = linear(x_key, params['w_key'])
     vprime  = linear(x_value, params['w_value'])
     gate    = lora_ffn(x_gate, params['gate_lora'])
-    iclr    = jax.nn.sigmoid(lora_ffn(x_iclr, params['iclr_lora']))
+    
+    iclr    = lora_ffn(x_iclr, params['iclr_lora'])
+    iclr    = iclr.apply(jax.nn.sigmoid) if hasattr(iclr, 'apply') else jax.nn.sigmoid(iclr)
 
     # rope
     k = k.reshape(B, T, -1, H)
@@ -110,6 +120,7 @@ def tm_final(x: ArrayLike, params, r, d, k, v, gate, iclr, wkv_state, *, config:
 
         wkv_state = wkv_state * decay_t.mT - wkv_state @ removal_k_t @ (iclr_t * removal_k_t).mT
         wkv_state = wkv_state + v_t @ replacement_k_t.mT
+        wkv_state = wkv_state.astype(jnp.float32) if hasattr(wkv_state, 'astype') else wkv_state
         y = wkv_state @ r_t
 
         return (wkv_state, t + 1), y.reshape(B, C)
@@ -118,7 +129,9 @@ def tm_final(x: ArrayLike, params, r, d, k, v, gate, iclr, wkv_state, *, config:
     out = out.transpose(1, 0, 2)
     out = group_norm(out.reshape(B * T, C), N, params['group_norm']).reshape(B, T, C)
 
-    bonus = jnp.sum(r * k * params['bonus_multiplier']['w'], axis=-1, keepdims=True) * v
+    bonus_base = r * k * params['bonus_multiplier']['w']
+    bonus = bonus_base.sum(axis=-1, keepdims=True) if hasattr(bonus_base, 'sum') else jnp.sum(bonus_base, axis=-1, keepdims=True)
+    bonus = bonus * v
     bonus = bonus.reshape(B, T, C)
     out = (out + bonus) * gate
     out = linear(out, params['w_output'])
@@ -146,7 +159,8 @@ def tm_init_fwd(x: ArrayLike, params, *, state, config: PratchyaConfig):
 def tm_fwd(x: ArrayLike, params, *, vprime_0, state, config: PratchyaConfig):
     layer_idx = state['layer_idx']
     r, d, k, vprime, gate, iclr, x_value, tm_state = tm_prepare(layer_idx, x, params, state=state, config=config)
-    v_residual_gate = jax.nn.sigmoid(lora_ffn(x_value, params['nu_lora']))
+    v_residual_gate = lora_ffn(x_value, params['nu_lora'])
+    v_residual_gate = v_residual_gate.apply(jax.nn.sigmoid) if hasattr(v_residual_gate, 'apply') else jax.nn.sigmoid(v_residual_gate)
     v = lerp(vprime, vprime_0, v_residual_gate)
     out, wkv_state = tm_final(x, params, r, d, k, v, gate, iclr, state['wkv_state'][layer_idx], config=config)
     
@@ -164,11 +178,19 @@ def tm_fwd(x: ArrayLike, params, *, vprime_0, state, config: PratchyaConfig):
 def cm_fwd(x: ArrayLike, params, *, state):
     layer_idx = state['layer_idx']
     cm_state = state['cm_state'][layer_idx]
-    x_shift = jnp.concat([cm_state, x[:, :-1, :]], axis=1)
+    if hasattr(cm_state, 'concat'):
+        x_fp8 = cm_state.__class__(x, cm_state.block_grid)
+        x_prev_fp8 = cm_state.__class__(x[:, :-1, :], cm_state.block_grid)
+        x_shift = cm_state.__class__.concat([cm_state, x_prev_fp8], axis=1)
+        x_to_lerp = x_fp8
+    else:
+        x_shift = jnp.concat([cm_state, x[:, :-1, :]], axis=1)
+        x_to_lerp = x
+        
     cm_state = x[:, -1:, :]
-    x_k = lerp(x, x_shift, params['mu_x']['w'])
+    x_k = lerp(x_to_lerp, x_shift, params['mu_x']['w'])
     k = linear(x_k, params['w_k'])
-    k = jnp.pow(jax.nn.relu(k), 2)
+    k = k.apply(lambda v: jnp.pow(jax.nn.relu(v), 2)) if hasattr(k, 'apply') else jnp.pow(jax.nn.relu(k), 2)
     v = linear(k, params['w_v'])
 
     cm_state = state['cm_state'].at[layer_idx].set(cm_state)
@@ -182,7 +204,7 @@ def cm_fwd(x: ArrayLike, params, *, state):
 
 def fwd_fn(input_ids: ArrayLike, params: dict, *, state, config: PratchyaConfig):
     x = embed(input_ids, params['embed_tokens'])
-    x = rmsnorm(x, params['pre_rmsnorm'], eps=config.rmsnorm_epsilon)
+    x = x.apply(lambda v: rmsnorm(v, params['pre_rmsnorm'], eps=config.rmsnorm_epsilon)) if hasattr(x, 'apply') else rmsnorm(x, params['pre_rmsnorm'], eps=config.rmsnorm_epsilon)
     x, v0, state = rwkv_init_block(x, params['rwkv_init_block'], state=state, config=config)
 
     def rwkv_block_scan(carry, params):
@@ -191,7 +213,7 @@ def fwd_fn(input_ids: ArrayLike, params: dict, *, state, config: PratchyaConfig)
         return (x, v0, state), None
 
     (x, _, state), _ = jax.lax.scan(rwkv_block_scan, (x, v0, state), params['rwkv_block'])
-    x = rmsnorm(x, params['final_rmsnorm'], eps=config.rmsnorm_epsilon)
+    x = x.apply(lambda v: rmsnorm(v, params['final_rmsnorm'], eps=config.rmsnorm_epsilon)) if hasattr(x, 'apply') else rmsnorm(x, params['final_rmsnorm'], eps=config.rmsnorm_epsilon)
     logits = linear(x, params['lm_head'])
 
     state = {
