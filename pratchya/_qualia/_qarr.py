@@ -158,6 +158,10 @@ class QArrayImpl:
         return QArrayImpl(x_out, self.__tgrid)
 
     def __getitem__(self, idx):
+        # Fast path for unquantized arrays (like the output of qx.silu)
+        if not hasattr(self, '_QArrayImpl__tgrid'):
+            return QArrayImpl(self.get_value()[idx], quant=False)
+            
         # We use pure JAX here instead of self.dequantize() (which calls a Pallas kernel).
         # Pallas kernels are opaque to XLA, so it would force a full materialization of the array.
         # By using pure JAX, XLA will push the `[idx]` slice ALL the way down through the reshapes
@@ -258,6 +262,8 @@ class QArrayImpl:
         return _FP8IndexUpdateHelper(self)
 
     def astype(self, dtype):
+        if not hasattr(self, '_QArrayImpl__tgrid'):
+            return self.get_value().astype(dtype)
         return self.dequantize(dtype)
 
     @property
@@ -284,6 +290,11 @@ class QArrayImpl:
     def mT(self):
         grid = (self.__tgrid[1], self.__tgrid[0])
         return QArrayImpl(self.astype(jnp.float32).mT, grid)
+
+    @property
+    def T(self):
+        grid = (self.__tgrid[1], self.__tgrid[0])
+        return QArrayImpl(self.astype(jnp.float32).T, grid)
 
     def reshape(self, *args, **kwargs):
         x_fp32 = self.dequantize(jnp.float32)
@@ -336,15 +347,23 @@ class QArrayImpl:
         return cls(out_fp32, new_grid)
 
     def _tree_flatten(self):
-        children = (self.__value, self.__sc_fp8, self.__sc_fp32)
-        aux_data = self.__tgrid
+        if hasattr(self, '_QArrayImpl__tgrid'):
+            children = (self.__value, self.__sc_fp8, self.__sc_fp32)
+            aux_data = (True, self.__tgrid)
+        else:
+            children = (self.__value,)
+            aux_data = (False, None)
         return (children, aux_data)
 
     @classmethod
     def _tree_unflatten(cls, aux_data, children):
+        is_quant, tgrid = aux_data
         obj = cls.__new__(cls)
-        obj.__tgrid = aux_data
-        obj.__value, obj.__sc_fp8, obj.__sc_fp32 = children
+        if is_quant:
+            obj._QArrayImpl__tgrid = tgrid
+            obj._QArrayImpl__value, obj._QArrayImpl__sc_fp8, obj._QArrayImpl__sc_fp32 = children
+        else:
+            obj._QArrayImpl__value = children[0]
         return obj
 
 
@@ -377,6 +396,9 @@ def quantize_kernel(x_ref, x_out_ref, sc_fp8_ref, sc_fp32_ref):
     sc_fp32_ref[...] = M_j.reshape(1, 1, 1, 1)
 
 
+import functools
+
+@functools.partial(jax.jit, static_argnames=['tgrid'])
 def quantize_impl(x: ArrayLike, tgrid: Tuple = (128, 128)):
     orig_shape = x.shape
     if x.ndim == 1:
@@ -402,24 +424,38 @@ def quantize_impl(x: ArrayLike, tgrid: Tuple = (128, 128)):
     
     x_reshaped = x_reshaped.reshape(M, K, a, b)
     
-    x_fp8, sc_fp8, sc_fp32 = pl.pallas_call(
-        quantize_kernel,
-        out_shape=(
-            jax.ShapeDtypeStruct(x_reshaped.shape, dtype=jnp.float8_e4m3fn),
-            jax.ShapeDtypeStruct((M, 1, K, 1), dtype=jnp.float8_e8m0fnu),
-            jax.ShapeDtypeStruct((M, 1, 1, 1), dtype=jnp.float32)
-        ),
-        in_specs=[
-            pl.BlockSpec((1, K, a, b), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE)
-        ],
-        out_specs=[
-            pl.BlockSpec((1, K, a, b), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
-            pl.BlockSpec((1, 1, K, 1), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
-            pl.BlockSpec((1, 1, 1, 1), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
-        ],
-        interpret=INTERPRET,
-        grid=(M,)
-    )(x_reshaped)
+    if IS_CPU:
+        m_i = jnp.max(jnp.abs(x_reshaped), axis=(-2, -1), keepdims=True)
+        m_i = jnp.maximum(m_i, FP8E8M0_MIN.astype(m_i.dtype))
+        M_j = jnp.max(m_i, axis=(-3, -2, -1), keepdims=True)
+        M_j = jnp.maximum(M_j, FP32_MIN.astype(M_j.dtype))
+        S_1i_f32 = m_i / M_j
+        S_1i_f32 = jnp.maximum(S_1i_f32, FP32_MIN.astype(M_j.dtype))
+        sc_fp8 = S_1i_f32.astype(jnp.float8_e8m0fnu)
+        S_eff = (sc_fp8.astype(M_j.dtype) * M_j)
+        S_eff = jnp.maximum(S_eff, 1e-7)
+        x_fp8 = (x_reshaped / S_eff * 256.0).astype(jnp.float8_e4m3fn)
+        sc_fp8 = sc_fp8.reshape(M, 1, K, 1)
+        sc_fp32 = M_j.reshape(M, 1, 1, 1)
+    else:
+        x_fp8, sc_fp8, sc_fp32 = pl.pallas_call(
+            quantize_kernel,
+            out_shape=(
+                jax.ShapeDtypeStruct(x_reshaped.shape, dtype=jnp.float8_e4m3fn),
+                jax.ShapeDtypeStruct((M, 1, K, 1), dtype=jnp.float8_e8m0fnu),
+                jax.ShapeDtypeStruct((M, 1, 1, 1), dtype=jnp.float32)
+            ),
+            in_specs=[
+                pl.BlockSpec((1, K, a, b), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE)
+            ],
+            out_specs=[
+                pl.BlockSpec((1, K, a, b), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
+                pl.BlockSpec((1, 1, K, 1), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
+                pl.BlockSpec((1, 1, 1, 1), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
+            ],
+            interpret=INTERPRET,
+            grid=(M,)
+        )(x_reshaped)
 
     x_fp8 = x_fp8.reshape(*shape[:-2], shape[-2] // a, shape[-1] // b, a, b)
     x_fp8 = x_fp8.transpose(*dims[:-4], dims[-4], dims[-2], dims[-3], dims[-1])
@@ -454,6 +490,7 @@ def dequantize_kernel(x_ref, sc_fp8_ref, sc_fp32_ref, o_ref):
     o_ref[...] = x.astype(jnp.float32) * x_sc / 256.0
 
 
+@functools.partial(jax.jit, static_argnames=['dtype', 'tgrid'])
 def dequantize_impl(x_fp8: ArrayLike, sc_fp8: ArrayLike, sc_fp32: ArrayLike, dtype: DTypeLike, tgrid: Tuple):
     orig_shape = x_fp8.shape
     if x_fp8.ndim == 1:
@@ -476,18 +513,23 @@ def dequantize_impl(x_fp8: ArrayLike, sc_fp8: ArrayLike, sc_fp32: ArrayLike, dty
     sc_fp8_reshaped = sc_fp8.reshape(M_total, 1, K, 1)
     sc_fp32_reshaped = sc_fp32.reshape(M_total, 1, 1, 1)
     
-    x_out = pl.pallas_call(
-        dequantize_kernel,
-        out_shape=jax.ShapeDtypeStruct(x_reshaped.shape, dtype=jnp.float32),
-        in_specs=[
-            pl.BlockSpec((1, K, a, b), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
-            pl.BlockSpec((1, 1, K, 1), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
-            pl.BlockSpec((1, 1, 1, 1), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
-        ],
-        out_specs=pl.BlockSpec((1, K, a, b), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
-        interpret=INTERPRET,
-        grid=(M_total,)
-    )(x_reshaped, sc_fp8_reshaped, sc_fp32_reshaped)
+    if IS_CPU:
+        x_sc = sc_fp8_reshaped.astype(jnp.float32) * sc_fp32_reshaped
+        x_out = x_reshaped.astype(jnp.float32) * x_sc / 256.0
+    else:
+        x_out = jnp.zeros(x_reshaped.shape, dtype=jnp.float32)
+        pl.pallas_call(
+            dequantize_kernel,
+            out_shape=jax.ShapeDtypeStruct(x_out.shape, x_out.dtype),
+            in_specs=[
+                pl.BlockSpec((1, K, a, b), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
+                pl.BlockSpec((1, 1, K, 1), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
+                pl.BlockSpec((1, 1, 1, 1), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
+            ],
+            out_specs=pl.BlockSpec((1, K, a, b), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
+            interpret=INTERPRET,
+            grid=(M_total,)
+        )(x_reshaped, sc_fp8_reshaped, sc_fp32_reshaped, out=x_out)
 
     x_out = x_out.reshape(*shape[:-2], shape[-2] // a, shape[-1] // b, a, b)
     x_out = x_out.transpose(*dims[:-4], dims[-4], dims[-2], dims[-3], dims[-1])

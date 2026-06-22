@@ -33,7 +33,23 @@ def __getattr__(name):
         # Run the actual JAX math
         result = jax_fn(*unwrapped_args, **unwrapped_kwargs)
         
-        # Re-wrap the result back into a QArrayImpl (not quantized by default for activations)
+        # Find the first quantized input to steal its grid logic and shape
+        quant_arg = next((a for a in args if isinstance(a, QArrayImpl) and hasattr(a, '_QArrayImpl__tgrid')), None)
+        
+        if quant_arg:
+            if isinstance(result, tuple):
+                # Only requantize elements that preserved their shape
+                return tuple(
+                    quant_arg._requantize(r) if r.shape == quant_arg.shape else QArrayImpl(r, quant=False)
+                    for r in result
+                )
+            
+            # If shape is exactly the same, requantize. Otherwise leave it as FP32.
+            if result.shape == quant_arg.shape:
+                return quant_arg._requantize(result)
+            return QArrayImpl(result, quant=False)
+            
+        # Re-wrap the result back into an unquantized QArrayImpl if no input was quantized
         if isinstance(result, tuple):
             return tuple(QArrayImpl(r, quant=False) for r in result)
         return QArrayImpl(result, quant=False)
