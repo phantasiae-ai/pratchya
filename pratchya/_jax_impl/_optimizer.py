@@ -6,11 +6,11 @@ from dataclasses import dataclass
 import functools
 import jax, jax.numpy as jnp
 import optax
-from .._kernel._fp8 import ArrayFP8
+from .._qualia._qarr import QArrayImpl
 
 class MiulionState(NamedTuple):
     count: ArrayLike
-    momentum: ArrayFP8
+    momentum: QArrayImpl
 
 @dataclass
 class MiulionHyperParams:
@@ -21,7 +21,7 @@ class MiulionHyperParams:
     total_steps: int = 100000
     beta1: float = 0.9
     beta2: float = 0.99
-    block_size: int = 128
+    blksize: int = 128
     ns_steps: int = 5
 
 
@@ -62,7 +62,7 @@ def newton_schulz(G, steps=5):
 def miulion_optimizer(hyperparams: MiulionHyperParams, scheduler: MiulionScheduler):
     beta1 = hyperparams.beta1
     beta2 = hyperparams.beta2
-    block_size = hyperparams.block_size
+    blksize = hyperparams.blksize
     ns_steps = hyperparams.ns_steps
 
     def init_fn(params):
@@ -70,10 +70,10 @@ def miulion_optimizer(hyperparams: MiulionHyperParams, scheduler: MiulionSchedul
         def make_leaf(params):
             shape = params.shape
             m = jnp.zeros_like(shape)
-            if shape[-2] < block_size:
-                return ArrayFP8(m, (1, block_size))
+            if shape[-2] < blksize:
+                return QArrayImpl(m, (1, blksize))
             
-            return ArrayFP8(m, (block_size, block_size))
+            return QArrayImpl(m, (blksize, blksize))
         
         momentum = jax.tree_util.tree_map(make_leaf, params)
 
@@ -109,7 +109,7 @@ def miulion_optimizer(hyperparams: MiulionHyperParams, scheduler: MiulionSchedul
             orig_size = g.size
             flat_g = g.ravel()
 
-            block_size = m.shape[-1] // m_sc.shape[-1]
+            blksize = m.shape[-1] // m_sc.shape[-1]
 
             pad_size = m.size - orig_size
             padded_flat_g = jnp.pad(flat_g, (0, pad_size)) if pad_size > 0 else flat_g
@@ -120,7 +120,7 @@ def miulion_optimizer(hyperparams: MiulionHyperParams, scheduler: MiulionSchedul
             c_blocked = beta1 * m + (1.0 - beta1) * g_blocked
             new_m_blocked = beta2 * m + (1.0 - beta2) * g_blocked
 
-            new_m, new_m_sc = block_quantize(new_m_blocked, block_size)
+            new_m, new_m_sc = block_quantize(new_m_blocked, blksize)
             c = c_blocked.ravel()[:orig_size].reshape(orig_shape)
 
             if should_use_muon(path, g):

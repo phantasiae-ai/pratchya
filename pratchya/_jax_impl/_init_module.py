@@ -4,7 +4,7 @@ from jax.typing import ArrayLike
 import jax, jax.numpy as jnp
 
 from .._config import PratchyaConfig
-from .._kernel._fp8 import ArrayFP8
+from .._qualia._qarr import QArrayImpl
 from ._key import Key
 
 
@@ -14,12 +14,12 @@ def init_linear(key, in_features, out_features, dtype, bias=False, initializer_f
 
     w = initializer_fn(key, (in_features, out_features), dtype=dtype)
     if quantize:
-        w = ArrayFP8(w, block_grid)
+        w = QArrayImpl(w, block_grid)
 
     if bias:
         b = initializer_fn(key, (1, out_features), dtype=dtype)
         if quantize:
-            b = ArrayFP8(b, (1, block_grid[-1]))
+            b = QArrayImpl(b, (1, block_grid[-1]))
 
         return {
             'w': w,
@@ -35,17 +35,17 @@ def init_fn(key: int, config: PratchyaConfig):
 
     def lora_ffn(hidden_size, lora_rank, dtype):
         return dict(
-            lin1=init_linear(key(), hidden_size, lora_rank, dtype, block_grid=(1, config.block_size)),
-            lin2=init_linear(key(), lora_rank, hidden_size, dtype, block_grid=(1, config.block_size)),
+            lin1=init_linear(key(), hidden_size, lora_rank, dtype, block_grid=(1, config.blksize)),
+            lin2=init_linear(key(), lora_rank, hidden_size, dtype, block_grid=(1, config.blksize)),
         )
     
     def tm(init=False):
         layer = dict(
             mu=init_linear(key(), 6, config.hidden_size, jnp.float32, quantize=False),
-            w_key=init_linear(key(), config.hidden_size, config.hidden_size, jnp.float32, block_grid=(config.block_size, config.block_size)),
-            w_value=init_linear(key(), config.hidden_size, config.hidden_size, jnp.float32, block_grid=(config.block_size, config.block_size)),
-            w_output=init_linear(key(), config.hidden_size, config.hidden_size, jnp.float32, block_grid=(config.block_size, config.block_size)),
-            w_receptance=init_linear(key(), config.hidden_size, config.hidden_size, jnp.float32, block_grid=(config.block_size, config.block_size)),
+            w_key=init_linear(key(), config.hidden_size, config.hidden_size, jnp.float32, block_grid=(config.blksize, config.blksize)),
+            w_value=init_linear(key(), config.hidden_size, config.hidden_size, jnp.float32, block_grid=(config.blksize, config.blksize)),
+            w_output=init_linear(key(), config.hidden_size, config.hidden_size, jnp.float32, block_grid=(config.blksize, config.blksize)),
+            w_receptance=init_linear(key(), config.hidden_size, config.hidden_size, jnp.float32, block_grid=(config.blksize, config.blksize)),
 
             gate_lora=lora_ffn(config.hidden_size, config.lora_rank, jnp.float32),
             decay_lora=lora_ffn(config.hidden_size, config.lora_rank, jnp.float32),
@@ -65,8 +65,8 @@ def init_fn(key: int, config: PratchyaConfig):
     
     def cm():
         return dict(
-            w_k=init_linear(key(), config.hidden_size, config.intermediate_size, jnp.float32, block_grid=(config.block_size, config.block_size)),
-            w_v=init_linear(key(), config.intermediate_size, config.hidden_size, jnp.float32, block_grid=(config.block_size, config.block_size)),
+            w_k=init_linear(key(), config.hidden_size, config.intermediate_size, jnp.float32, block_grid=(config.blksize, config.blksize)),
+            w_v=init_linear(key(), config.intermediate_size, config.hidden_size, jnp.float32, block_grid=(config.blksize, config.blksize)),
             mu_x=init_linear(key(), 1, config.hidden_size, jnp.float32, quantize=False),
         )
 
@@ -107,8 +107,8 @@ def init_state(x: ArrayLike, config: PratchyaConfig, quantize=True):
     cm_state = jnp.zeros((L, B, 1, C), dtype=jnp.float32)
     wkv_state = jnp.zeros((L, B, N, H, H), dtype=jnp.float32)
     if quantize:
-        tm_state = ArrayFP8(tm_state, block_grid=(1, config.block_size))
-        cm_state = ArrayFP8(cm_state, block_grid=(1, config.block_size))
+        tm_state = QArrayImpl(tm_state, block_grid=(1, config.blksize))
+        cm_state = QArrayImpl(cm_state, block_grid=(1, config.blksize))
 
     # rope
     inv_freq = 1.0 / (config.rope_theta ** (jnp.arange(0, H, 2, dtype=jnp.float32) / H))

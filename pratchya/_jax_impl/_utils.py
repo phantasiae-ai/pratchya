@@ -2,15 +2,15 @@
 from jax.typing import ArrayLike
 import jax.numpy as jnp, jax
 from typing import Union, Dict
-from .._kernel._fp8 import ArrayFP8
+from .._qualia._qarr import QArrayImpl
 
-def lora_ffn(x: ArrayFP8, params: Dict):
+def lora_ffn(x: QArrayImpl, params: Dict):
     x = x @ params['lin1']['w']
     x = x.apply(lambda x: jax.nn.silu(x))
     x = x @ params['lin2']['w']
     return x
 
-def linear(x: ArrayFP8, params: Dict):
+def linear(x: QArrayImpl, params: Dict):
     x =  x @ params['w']
     return x
 

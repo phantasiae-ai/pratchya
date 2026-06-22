@@ -8,8 +8,8 @@ PratchyaDummyConfig = PratchyaConfig( # dummy config for test
     intermediate_size = 64,
     lora_rank = 8,
     head_dim = 8,
-    n_layers = 4,
-    block_size = 4
+    n_layers = 2,
+    blksize = 4
 )
 
 Pratchya500M = PratchyaConfig(
@@ -18,7 +18,7 @@ Pratchya500M = PratchyaConfig(
     lora_rank = 128,
     head_dim = 64,
     n_layers = 16,
-    block_size=16
+    blksize=16
 )
 
 Pratchya1B = PratchyaConfig(
@@ -27,7 +27,7 @@ Pratchya1B = PratchyaConfig(
     lora_rank = 128,
     head_dim = 128,
     n_layers = 16,
-    block_size=16
+    blksize=16
 )
 
 Pratchya3B = PratchyaConfig(
@@ -36,7 +36,7 @@ Pratchya3B = PratchyaConfig(
     lora_rank = 256,
     head_dim = 128,
     n_layers = 22,
-    block_size=16
+    blksize=16
 )
 
 Pratchya7B = PratchyaConfig(
@@ -45,5 +45,5 @@ Pratchya7B = PratchyaConfig(
     lora_rank = 256,
     head_dim = 256,
     n_layers = 32,
-    block_size=32
+    blksize=32
 )
