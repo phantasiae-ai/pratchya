@@ -67,14 +67,11 @@ def miulion_optimizer(hyperparams: MiulionHyperParams, scheduler: MiulionSchedul
 
     def init_fn(params):
         def make_momentum_leaf(p):
-            if isinstance(p, QArrayImpl):
-                tgrid = p.tgrid
-                m = jnp.zeros(p.shape, dtype=jnp.float32)
-                return QArrayImpl(m, tgrid)
-            else:
+            if jnp.issubdtype(p.dtype, jnp.floating) and p.dtype not in (jnp.float8_e4m3fn, jnp.float8_e8m0fnu):
                 return jnp.zeros_like(p, dtype=jnp.float32)
+            return jnp.zeros_like(p)
         
-        momentum = jax.tree_util.tree_map(make_momentum_leaf, params, is_leaf=lambda p: isinstance(p, QArrayImpl))
+        momentum = jax.tree_util.tree_map(make_momentum_leaf, params)
 
         return MiulionState(
             count=jnp.zeros([], jnp.int32),
