@@ -13,7 +13,7 @@ def lerp(i: jax.Array, j: jax.Array, w: jax.Array):
     return i + (j - i) * w
 
 def normalized(x: jax.Array, *, axis: int, ord: int = 2, eps: float = 1e-12) -> jax.Array:
-    x_norm = jnp.sqrt(jnp.sum(jnp.square(x), axis=axis, keepdims=True) + eps**2)
+    x_norm = jnp.sqrt(jnp.sum(jnp.square(x), axis=axis, keepdims=True) + eps)
     x = x / x_norm
     return x
 
@@ -29,12 +29,12 @@ class EmbeddingScaled(nnx.Module):
         self.embed_scale = jnp.sqrt(hidden_size)
         self.tgrid = tgrid
 
-    def __call__(self, input_ids: jax.Array) -> QArrayImpl:
+    def __call__(self, input_ids: jax.Array) -> jax.Array:
         blksize = self.tgrid[-1]
         x = self.embedding[input_ids]
         x = x.astype(jnp.float32)
         x = x * self.embed_scale
-        return QArrayImpl(x, (1, blksize))
+        return x
 
 class Linear(nnx.Module):
     def __init__(self, fan_in: int, fan_out: int, tgrid: tuple, *, rngs: nnx.Rngs, dtype: DTypeLike):
@@ -43,8 +43,11 @@ class Linear(nnx.Module):
         kernel = QArrayImpl(kernel, tgrid)
         self.kernel = nnx.Param(kernel)
 
-    def __call__(self, x: QArrayImpl):
-        return x @ self.kernel
+    def __call__(self, x: jax.Array):
+        a, b = self.kernel.tgrid
+        tgrid_x = (1, a)
+        x_q = QArrayImpl(x, tgrid_x)
+        return (x_q @ self.kernel).astype(x.dtype)
     
 
 class Param(nnx.Param):
@@ -62,13 +65,11 @@ class RMSNorm(nnx.Module):
         scale = QArrayImpl(scale, tgrid)
         self.scale = nnx.Param(scale)
 
-    def __call__(self, x: QArrayImpl):
-        tgrid = x.tgrid
-        x = x.astype(jnp.float32)
-        inv_rms = jax.lax.rsqrt(jnp.average(jnp.square(x), axis=-1, keepdims=True) + self.epsilon)
-        x = x * inv_rms * self.scale.astype(jnp.float32)
-
-        return QArrayImpl(x, tgrid)
+    def __call__(self, x: jax.Array):
+        x_f32 = x.astype(jnp.float32)
+        inv_rms = jax.lax.rsqrt(jnp.average(jnp.square(x_f32), axis=-1, keepdims=True) + self.epsilon)
+        out = x_f32 * inv_rms * self.scale.astype(jnp.float32)
+        return out.astype(x.dtype)
 
 class LowRankFFN(nnx.Module):
     def __init__(
@@ -82,9 +83,9 @@ class LowRankFFN(nnx.Module):
         self.down = Linear(hidden_size, lora_rank, (a, 1), rngs=rngs, dtype=dtype)
         self.up = Linear(lora_rank, hidden_size, (b, 1), rngs=rngs, dtype=dtype)
 
-    def __call__(self, x: QArrayImpl) -> QArrayImpl:
+    def __call__(self, x: jax.Array) -> jax.Array:
         x = self.down(x)
-        x = x.apply(lambda _x: jax.nn.tanh(_x))
+        x = jax.nn.tanh(x)
         return self.up(x)
 
 
@@ -123,7 +124,7 @@ class TimeMix(nnx.Module):
         self.rotary_emb = RotaryEmbedding(config)
 
     def __call__(
-        self, x: QArrayImpl, 
+        self, x: jax.Array, 
         v_prime_0: jax.Array, 
         t_positions: jax.Array, 
         state: PratchyaState
@@ -133,26 +134,29 @@ class TimeMix(nnx.Module):
         layer_idx = self.layer_idx
 
         tm_state = state.tm_state[layer_idx]
-        x_shifted = QArrayImpl.concat([tm_state, x[:, :-1, :]], axis=1)
+        x_shifted = jnp.concatenate([tm_state, x[:, :-1, :]], axis=1)
         tm_state = x[:, -1:, :]
 
         _x = x.astype(jnp.float32)
         _x_shift = x_shifted.astype(jnp.float32)
-
         mu = self.mu.astype(jnp.float32)
-        x_receptance    = QArrayImpl(lerp(_x, _x_shift, mu[0]), x.tgrid)
-        x_decay         = QArrayImpl(lerp(_x, _x_shift, mu[1]), x.tgrid)
-        x_key           = QArrayImpl(lerp(_x, _x_shift, mu[2]), x.tgrid)
-        x_value         = QArrayImpl(lerp(_x, _x_shift, mu[3]), x.tgrid)
-        x_iclr          = QArrayImpl(lerp(_x, _x_shift, mu[4]), x.tgrid)
-        x_gate          = QArrayImpl(lerp(_x, _x_shift, mu[5]), x.tgrid)
+
+        def lerp(i, j, w):
+            return i + (j - i) * w
+
+        x_receptance    = lerp(_x, _x_shift, mu[0])
+        x_decay         = lerp(_x, _x_shift, mu[1])
+        x_key           = lerp(_x, _x_shift, mu[2])
+        x_value         = lerp(_x, _x_shift, mu[3])
+        x_iclr          = lerp(_x, _x_shift, mu[4])
+        x_gate          = lerp(_x, _x_shift, mu[5])
 
         r =         self.w_receptance(x_receptance)
         d =         self.decay_lora(x_decay)
         k =         self.w_key(x_key)
         v_prime =   self.w_value(x_value)
         gate =      self.gate_lora(x_gate)
-        iclr =      self.iclr_lora(x_iclr).apply(lambda _x_iclr: jax.nn.sigmoid(_x_iclr))
+        iclr =      jax.nn.sigmoid(self.iclr_lora(x_iclr))
 
         k = k.astype(jnp.float32)
         r = r.astype(jnp.float32)
@@ -170,14 +174,14 @@ class TimeMix(nnx.Module):
             v = v_prime_0 = v_prime.astype(jnp.float32)
         else:
             value_residual_gate = self.nu_lora(x_value)
-            value_residual_gate = value_residual_gate.apply(lambda _x_value: jax.nn.sigmoid(_x_value))
+            value_residual_gate = jax.nn.sigmoid(value_residual_gate)
             value_residual_gate = value_residual_gate.astype(jnp.float32)
             v_prime = v_prime.astype(jnp.float32)
             v_prime_0 = v_prime_0.astype(jnp.float32)
             v = lerp(v_prime, v_prime_0, value_residual_gate)
 
-        decay = jnp.exp(-jnp.exp(-0.5) * jax.nn.sigmoid(d.astype(jnp.float32)))
-        removal_k = k * jnp.astype(self.removal_key_multiplier.astype(jnp.float32), k.dtype)
+        decay = jnp.exp(-jnp.exp(d))
+        removal_k = k * self.removal_key_multiplier.astype(jnp.float32)
         removal_k = normalized(removal_k.reshape(B, T, N, -1), axis=-1).reshape(B, T, C)
         iclr = iclr.astype(jnp.float32)
         iclr_mix_amt = self.iclr_mix_amt.astype(jnp.float32)
@@ -213,7 +217,7 @@ class TimeMix(nnx.Module):
         bonus = bonus.reshape(B, T, C)
         out = (out + bonus) * gate.astype(jnp.float32)
 
-        out = QArrayImpl(out, x.tgrid)
+        out = out
         out = self.w_output(out)
 
         wkv_state = state.wkv_state.at[layer_idx].set(wkv_state)
@@ -236,23 +240,21 @@ class ChannelMix(nnx.Module):
 
         self.layer_idx = layer_idx   
 
-    def __call__(self, x: QArrayImpl, state: PratchyaState):
-        tgrid = x.tgrid
+    def __call__(self, x: jax.Array, state: PratchyaState):
+        tgrid = self.w_k.kernel.tgrid
         layer_idx = self.layer_idx
 
         cm_state = state.cm_state[layer_idx]
-        x_shifted = QArrayImpl.concat([cm_state, x[:, :-1, :]], axis=1)
+        x_shifted = jnp.concatenate([cm_state, x[:, :-1, :]], axis=1)
         cm_state = x[:, -1:, :]
 
-        _x = x.astype(jnp.float32)
-        _x_shifted = x_shifted.astype(jnp.float32)
+        _x = x
+        _x_shifted = x_shifted
 
         x_k = lerp(_x, _x_shifted, self.mu_x.astype(_x.dtype))
-        x_k = QArrayImpl(x_k, tgrid)
         k = self.w_k(x_k).astype(jnp.float32)
 
         k = jnp.pow(jax.nn.relu(k), 2)
-        k = QArrayImpl(k, tgrid)
         v = self.w_v(k)
 
         cm_state = state.cm_state.at[layer_idx].set(cm_state)
@@ -303,7 +305,7 @@ class RWKVBlock(nnx.Module):
         )
 
     def __call__(
-        self, x: QArrayImpl, 
+        self, x: jax.Array, 
         v_0: jax.Array, 
         t_positions: jax.Array,
         state: PratchyaState
@@ -318,5 +320,3 @@ class RWKVBlock(nnx.Module):
         x = x + dx
         
         return x, v_0, state
-
-

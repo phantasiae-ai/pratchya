@@ -29,8 +29,8 @@ class PratchyaConfig:
 
 @dataclass
 class PratchyaState:
-    tm_state: QArrayImpl
-    cm_state: QArrayImpl
+    tm_state: ArrayLike
+    cm_state: ArrayLike
     wkv_state: ArrayLike
     step: ArrayLike | None
 
@@ -47,8 +47,8 @@ def init_state(config: PratchyaConfig, B=1):
     wkv_state = jnp.zeros((config.n_layers, B, config.hidden_size // config.head_dim, config.head_dim, config.head_dim), jnp.float32)   
     tgrid = (1, config.blksize)
     return PratchyaState(
-        tm_state=QArrayImpl(tm_state, tgrid),
-        cm_state=QArrayImpl(cm_state, tgrid),
+        tm_state=tm_state,
+        cm_state=cm_state,
         wkv_state=wkv_state,
         step=0
     )
