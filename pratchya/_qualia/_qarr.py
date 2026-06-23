@@ -5,22 +5,11 @@ import math
 from typing import Tuple, Optional, Union
 import functools
 from jax.tree_util import register_pytree_node
-from jax.experimental import pallas as pl
 import numpy as np
 
 FP8E4M3_MIN = jnp.finfo(jnp.float8_e4m3fn).smallest_subnormal
 FP8E8M0_MIN = jnp.finfo(jnp.float8_e8m0fnu).smallest_subnormal
 FP32_MIN = np.float32(1e-12)
-
-IS_CPU = jax.default_backend() == "cpu"
-IS_TPU = jax.default_backend() == "tpu"
-INTERPRET = IS_CPU
-
-if IS_TPU:
-    from jax.experimental.pallas import tpu as pltpu
-    MEM_SPACE = pltpu.VMEM
-else:
-    MEM_SPACE = None
 
 
 class QArrayImpl:
@@ -485,84 +474,10 @@ def dequantize_impl_bwd(dtype, tgrid, res, g_out):
 
 dequantize_impl.defvjp(dequantize_impl_fwd, dequantize_impl_bwd)
 
-def matmul_kernel(x_ref, y_ref, sc_x8_ref, sc_x32_ref, sc_y8_ref, sc_y32_ref, o_ref, *, b):
-    acc = jnp.zeros((x_ref.shape[0], y_ref.shape[1]), dtype=jnp.float32)
-    def body(k, acc):
-        x_block = jax.lax.dynamic_slice(x_ref[...], (0, k*b), (x_ref.shape[0], b))
-        y_block = jax.lax.dynamic_slice(y_ref[...], (k*b, 0), (b, y_ref.shape[1]))
-        sc_x8 = jax.lax.dynamic_slice(sc_x8_ref[...], (0, k), (1, 1))[0, 0]
-        sc_x32 = jax.lax.dynamic_slice(sc_x32_ref[...], (0, k), (1, 1))[0, 0]
-        sc_y8 = jax.lax.dynamic_slice(sc_y8_ref[...], (k, 0), (1, 1))[0, 0]
-        sc_y32 = jax.lax.dynamic_slice(sc_y32_ref[...], (k, 0), (1, 1))[0, 0]
-        sc_x8_f32 = jax.lax.bitcast_convert_type(jax.lax.bitcast_convert_type(sc_x8, jnp.uint8).astype(jnp.uint32) << 23, jnp.float32)
-        sc_y8_f32 = jax.lax.bitcast_convert_type(jax.lax.bitcast_convert_type(sc_y8, jnp.uint8).astype(jnp.uint32) << 23, jnp.float32)
-        
-        scale_x = sc_x8_f32 * sc_x32
-        scale_y = sc_y8_f32 * sc_y32
-        prod = jnp.matmul(x_block, y_block, preferred_element_type=jnp.float32)
-        prod = prod * (scale_x * scale_y) / 65536.0
-        return acc + prod
-    acc = jax.lax.fori_loop(0, x_ref.shape[1] // b, body, acc)
-    o_ref[...] = acc
-
-def matmul_impl_2d(x_fp8, sc_x8, sc_x32, y_fp8, sc_y8, sc_y32, a, b, c):
-    H_a, W_a = x_fp8.shape
-    H_b, W_b = y_fp8.shape
-    x_out = pl.pallas_call(
-        functools.partial(matmul_kernel, b=b),
-        out_shape=jax.ShapeDtypeStruct((H_a, W_b), dtype=jnp.float32),
-        in_specs=[
-            pl.BlockSpec((a, W_a), lambda i, j: (i, 0), memory_space=MEM_SPACE),
-            pl.BlockSpec((H_b, c), lambda i, j: (0, j), memory_space=MEM_SPACE),
-            pl.BlockSpec((1, W_a // b), lambda i, j: (i, 0), memory_space=MEM_SPACE),
-            pl.BlockSpec((1, W_a // b), lambda i, j: (i, 0), memory_space=MEM_SPACE),
-            pl.BlockSpec((H_b // b, 1), lambda i, j: (0, j), memory_space=MEM_SPACE),
-            pl.BlockSpec((H_b // b, 1), lambda i, j: (0, j), memory_space=MEM_SPACE),
-        ],
-        out_specs=pl.BlockSpec((a, c), lambda i, j: (i, j), memory_space=MEM_SPACE),
-        grid=(H_a // a, W_b // c),
-        interpret=INTERPRET
-    )(x_fp8, y_fp8, sc_x8, sc_x32, sc_y8, sc_y32)
-    return x_out
-
 def matmul_impl(x_fp8, x_sc8, x_sc32, y_fp8, y_sc8, y_sc32, block_grid_x: Tuple, block_grid_y: Tuple):
-    H_a, W_a = x_fp8.shape[-2:]
-    H_b, W_b = y_fp8.shape[-2:]
-    M_x, K_x = x_sc8.shape
-    M_y, K_y = y_sc8.shape
-    a, b = block_grid_x
-    b2, c = block_grid_y
-    
-    if not IS_TPU or b != b2 or H_a % a != 0 or W_a % b != 0 or H_b % b2 != 0 or W_b % c != 0:
-        # Graceful fallback to pure JAX if grids are totally misaligned or running on non-TPU
-        x_f32 = dequantize_impl(x_fp8, x_sc8, x_sc32, jnp.float32, block_grid_x)
-        y_f32 = dequantize_impl(y_fp8, y_sc8, y_sc32, jnp.float32, block_grid_y)
-        return jnp.matmul(x_f32, y_f32)
-        
-    orig_batch_x = x_fp8.shape[:-2]
-    orig_batch_y = y_fp8.shape[:-2]
-    batch_shape = jnp.broadcast_shapes(orig_batch_x, orig_batch_y)
-    x_fp8 = jnp.broadcast_to(x_fp8, (*batch_shape, H_a, W_a))
-    y_fp8 = jnp.broadcast_to(y_fp8, (*batch_shape, H_b, W_b))
-    sc_x8 = x_sc8.reshape(*orig_batch_x, H_a // a, W_a // b)
-    sc_x8 = jnp.broadcast_to(sc_x8, (*batch_shape, H_a // a, W_a // b))
-    sc_x32 = jnp.repeat(x_sc32.reshape(-1), K_x).reshape(*orig_batch_x, H_a // a, W_a // b)
-    sc_x32 = jnp.broadcast_to(sc_x32, (*batch_shape, H_a // a, W_a // b))
-    sc_y8 = y_sc8.reshape(*orig_batch_y, H_b // b, W_b // c)
-    sc_y8 = jnp.broadcast_to(sc_y8, (*batch_shape, H_b // b, W_b // c))
-    sc_y32 = jnp.repeat(y_sc32.reshape(-1), K_y).reshape(*orig_batch_y, H_b // b, W_b // c)
-    sc_y32 = jnp.broadcast_to(sc_y32, (*batch_shape, H_b // b, W_b // c))
-    B = math.prod(batch_shape) if len(batch_shape) > 0 else 1
-    x_fp8 = x_fp8.reshape(B, H_a, W_a)
-    y_fp8 = y_fp8.reshape(B, H_b, W_b)
-    sc_x8 = sc_x8.reshape(B, H_a // a, W_a // b)
-    sc_x32 = sc_x32.reshape(B, H_a // a, W_a // b)
-    sc_y8 = sc_y8.reshape(B, H_b // b, W_b // c)
-    sc_y32 = sc_y32.reshape(B, H_b // b, W_b // c)
-    
-    mapped_fn = jax.vmap(functools.partial(matmul_impl_2d, a=a, b=b, c=c))
-    out = mapped_fn(x_fp8, sc_x8, sc_x32, y_fp8, sc_y8, sc_y32)
-    return out.reshape(*batch_shape, H_a, W_b)
+    x_f32 = dequantize_impl(x_fp8, x_sc8, x_sc32, jnp.float32, block_grid_x)
+    y_f32 = dequantize_impl(y_fp8, y_sc8, y_sc32, jnp.float32, block_grid_y)
+    return jnp.matmul(x_f32, y_f32)
 
 matmul_impl = jax.custom_vjp(matmul_impl, nondiff_argnums=(6, 7))
 
@@ -604,88 +519,12 @@ def matmul_impl_bwd(block_grid_x, block_grid_y, res, g_out):
 matmul_impl.defvjp(matmul_impl_fwd, matmul_impl_bwd)
 
 
-def elementwise_kernel(x_ref, y_ref, sc_x8_ref, sc_x32_ref, sc_y8_ref, sc_y32_ref, o_ref, *, op):
-    x_block = x_ref[...]
-    y_block = y_ref[...]
-    sc_x8 = sc_x8_ref[...]
-    sc_x32 = sc_x32_ref[...]
-    sc_y8 = sc_y8_ref[...]
-    sc_y32 = sc_y32_ref[...]
-    
-    sc_x8_f32 = jax.lax.bitcast_convert_type(jax.lax.bitcast_convert_type(sc_x8, jnp.uint8).astype(jnp.uint32) << 23, jnp.float32)
-    sc_y8_f32 = jax.lax.bitcast_convert_type(jax.lax.bitcast_convert_type(sc_y8, jnp.uint8).astype(jnp.uint32) << 23, jnp.float32)
-    
-    scale_x = sc_x8_f32 * sc_x32 / 256.0
-    scale_y = sc_y8_f32 * sc_y32 / 256.0
-    
-    x_val = x_block.astype(jnp.bfloat16).astype(jnp.float32) * scale_x
-    y_val = y_block.astype(jnp.bfloat16).astype(jnp.float32) * scale_y
-    o_ref[...] = op(x_val, y_val)
-
-def elementwise_impl_2d(x_fp8, sc_x8, sc_x32, y_fp8, sc_y8, sc_y32, *, a, b, op):
-    H, W = x_fp8.shape
-    x_out = pl.pallas_call(
-        functools.partial(elementwise_kernel, op=op),
-        out_shape=jax.ShapeDtypeStruct((H, W), dtype=jnp.float32),
-        in_specs=[
-            pl.BlockSpec((a, b), lambda i, j: (i, j), memory_space=MEM_SPACE),
-            pl.BlockSpec((a, b), lambda i, j: (i, j), memory_space=MEM_SPACE),
-            pl.BlockSpec((1, 1), lambda i, j: (i, j), memory_space=MEM_SPACE),
-            pl.BlockSpec((1, 1), lambda i, j: (i, j), memory_space=MEM_SPACE),
-            pl.BlockSpec((1, 1), lambda i, j: (i, j), memory_space=MEM_SPACE),
-            pl.BlockSpec((1, 1), lambda i, j: (i, j), memory_space=MEM_SPACE),
-        ],
-        out_specs=pl.BlockSpec((a, b), lambda i, j: (i, j), memory_space=MEM_SPACE),
-        grid=(H // a, W // b),
-        interpret=INTERPRET
-    )(x_fp8, y_fp8, sc_x8, sc_x32, sc_y8, sc_y32)
-    return x_out
-
-
 def make_elementwise_impl(op):
-    def impl(x_fp8, x_sc8, x_sc32, y_fp8, y_sc8, y_sc32, tgrid: Tuple):
-        M_x, K_x = x_sc8.shape
-        M_y, K_y = y_sc8.shape
-        a, b = tgrid
-        
-        orig_batch_x = x_fp8.shape[:-2]
-        orig_batch_y = y_fp8.shape[:-2]
-        orig_batch_x = x_fp8.shape[:-2] if x_fp8.ndim >= 2 else ()
-        orig_batch_y = y_fp8.shape[:-2] if y_fp8.ndim >= 2 else ()
-        orig_H_x = x_fp8.shape[-2] if x_fp8.ndim >= 2 else 1
-        orig_W_x = x_fp8.shape[-1] if x_fp8.ndim >= 1 else 1
-        orig_H_y = y_fp8.shape[-2] if y_fp8.ndim >= 2 else 1
-        orig_W_y = y_fp8.shape[-1] if y_fp8.ndim >= 1 else 1
-        
-        if not IS_TPU or orig_H_x % a != 0 or orig_W_x % b != 0 or orig_H_y % a != 0 or orig_W_y % b != 0:
-            x_f32 = dequantize_impl(x_fp8, x_sc8, x_sc32, jnp.float32, tgrid)
-            y_f32 = dequantize_impl(y_fp8, y_sc8, y_sc32, jnp.float32, tgrid)
-            out_f32 = op(x_f32, y_f32)
-            return out_f32
-            
-        K_x = x_sc8.shape[1]
-        K_y = y_sc8.shape[1]
-        batch_shape = jnp.broadcast_shapes(orig_batch_x, orig_batch_y)
-        
-        H, W = x_fp8.shape[-2:] if x_fp8.ndim >= 2 else (1, x_fp8.shape[-1] if x_fp8.ndim == 1 else 1)
-        x_fp8 = jnp.broadcast_to(x_fp8, (*batch_shape, H, W)).reshape(-1, H, W)
-        y_fp8 = jnp.broadcast_to(y_fp8, (*batch_shape, H, W)).reshape(-1, H, W)
-        
-        sc_x8 = x_sc8.reshape(*orig_batch_x, orig_H_x // a, orig_W_x // b)
-        sc_x8 = jnp.broadcast_to(sc_x8, (*batch_shape, H // a, W // b)).reshape(-1, H // a, W // b)
-        
-        sc_x32 = jnp.repeat(x_sc32.reshape(-1), K_x).reshape(*orig_batch_x, orig_H_x // a, orig_W_x // b)
-        sc_x32 = jnp.broadcast_to(sc_x32, (*batch_shape, H // a, W // b)).reshape(-1, H // a, W // b)
-        
-        sc_y8 = y_sc8.reshape(*orig_batch_y, orig_H_y // a, orig_W_y // b)
-        sc_y8 = jnp.broadcast_to(sc_y8, (*batch_shape, H // a, W // b)).reshape(-1, H // a, W // b)
-        
-        sc_y32 = jnp.repeat(y_sc32.reshape(-1), K_y).reshape(*orig_batch_y, orig_H_y // a, orig_W_y // b)
-        sc_y32 = jnp.broadcast_to(sc_y32, (*batch_shape, H // a, W // b)).reshape(-1, H // a, W // b)
-        
-        mapped_fn = jax.vmap(functools.partial(elementwise_impl_2d, a=a, b=b, op=op))
-        out = mapped_fn(x_fp8, sc_x8, sc_x32, y_fp8, sc_y8, sc_y32)
-        return out.reshape(*batch_shape, H, W)
+    def impl(x_fp8, x_sc8, x_sc32, y_fp8, y_sc8, y_sc32, tgrid):
+        x_f32 = dequantize_impl(x_fp8, x_sc8, x_sc32, jnp.float32, tgrid)
+        y_f32 = dequantize_impl(y_fp8, y_sc8, y_sc32, jnp.float32, tgrid)
+        out_f32 = op(x_f32, y_f32)
+        return out_f32
     
     impl = jax.custom_vjp(impl, nondiff_argnums=(6,))
     
