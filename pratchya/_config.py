@@ -41,10 +41,10 @@ class PratchyaOutput:
     state: PratchyaState | None
 
 
-def init_state(config: PratchyaConfig):
-    tm_state = jnp.zeros((config.n_layers, 1, config.hidden_size), jnp.float32)
-    cm_state = jnp.zeros((config.n_layers, 1, config.hidden_size), jnp.float32)
-    wkv_state = jnp.zeros((config.n_layers, config.hidden_size // config.head_dim, config.head_dim, config.head_dim), jnp.float32)   
+def init_state(config: PratchyaConfig, B=1):
+    tm_state = jnp.zeros((config.n_layers, B, 1, config.hidden_size), jnp.float32)
+    cm_state = jnp.zeros((config.n_layers, B, 1, config.hidden_size), jnp.float32)
+    wkv_state = jnp.zeros((config.n_layers, B, config.hidden_size // config.head_dim, config.head_dim, config.head_dim), jnp.float32)   
     tgrid = (1, config.blksize)
     return PratchyaState(
         tm_state=QArrayImpl(tm_state, tgrid),

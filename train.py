@@ -29,26 +29,36 @@ schedule = MiulionScheduler(
 )
 
 tx = miulion_optimizer(hyperparams, schedule)
-model = PratchyaCausalLM(Pratchya500M)
-optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+model = PratchyaCausalLM(Pratchya500M, rngs=nnx.Rngs(0))
+param_arrays = nnx.state(model, nnx.Param)
+opt_state = tx.init(param_arrays)
 
-# @nnx.jit
-def train_step(model, optimizer, batch):
+@nnx.jit
+def train_step(model: nnx.Module, opt_state, batch):
     def loss_fn(model):
         output = model(batch['input_ids'], batch['input_ids'])
         return output.loss
-
+        
     loss, grads = nnx.value_and_grad(loss_fn)(model)
-    optimizer.update(model, grads)
     
-    return loss
+    param_arrays = nnx.state(model, nnx.Param)
+    grad_arrays = nnx.state(grads, nnx.Param)
+    
+    updates, new_opt_state = tx.update(grad_arrays, opt_state, param_arrays)
 
-inp = jnp.arange(30).reshape(1, -1)
+    from pratchya._qualia._qarr import QArrayImpl
+    new_params = jax.tree_util.tree_map(
+        lambda p, u: p + u,
+        param_arrays, updates,
+        is_leaf=lambda x: isinstance(x, QArrayImpl)
+    )
+    nnx.update(model, new_params)
+    
+    return loss, new_opt_state
+
+inp = jnp.arange(10).reshape(1, -1)
 inp = {'input_ids': inp}
 
-# WHAT A TRAINING SCRIPT 🗣🗣
-for _ in range(20):
-
-    loss = train_step(model, optimizer, inp)
-
+for _ in range(10):
+    loss, opt_state = train_step(model, opt_state, inp)
     print(f"loss: {loss}")

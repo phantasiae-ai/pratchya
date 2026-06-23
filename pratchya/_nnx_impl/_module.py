@@ -128,13 +128,13 @@ class TimeMix(nnx.Module):
         t_positions: jax.Array, 
         state: PratchyaState
     ):
-        T, C, = x.shape
+        B, T, C, = x.shape
         N, H = self.n_head, self.head_dim
         layer_idx = self.layer_idx
 
         tm_state = state.tm_state[layer_idx]
-        x_shifted = QArrayImpl.concat([tm_state, x[:-1, :]], axis=0)
-        tm_state = x[-1:, :]
+        x_shifted = QArrayImpl.concat([tm_state, x[:, :-1, :]], axis=1)
+        tm_state = x[:, -1:, :]
 
         _x = x.astype(jnp.float32)
         _x_shift = x_shifted.astype(jnp.float32)
@@ -157,14 +157,14 @@ class TimeMix(nnx.Module):
         k = k.astype(jnp.float32)
         r = r.astype(jnp.float32)
 
-        k = k.reshape(T, -1, H)
-        r = r.reshape(T, -1, H)
+        k = k.reshape(B, T, -1, H)
+        r = r.reshape(B, T, -1, H)
 
         k = self.rotary_emb(k, t_positions)
         r = self.rotary_emb(r, t_positions)
 
-        k = k.reshape(T, -1)
-        r = r.reshape(T, -1)
+        k = k.reshape(B, T, -1)
+        r = r.reshape(B, T, -1)
 
         if layer_idx == 0:
             v = v_prime_0 = v_prime.astype(jnp.float32)
@@ -178,26 +178,26 @@ class TimeMix(nnx.Module):
 
         decay = jnp.exp(-jnp.exp(-0.5) * jax.nn.sigmoid(d.astype(jnp.float32)))
         removal_k = k * jnp.astype(self.removal_key_multiplier.astype(jnp.float32), k.dtype)
-        removal_k = normalized(removal_k.reshape(T, N, -1), axis=-1).reshape(T, C)
+        removal_k = normalized(removal_k.reshape(B, T, N, -1), axis=-1).reshape(B, T, C)
         iclr = iclr.astype(jnp.float32)
         iclr_mix_amt = self.iclr_mix_amt.astype(jnp.float32)
         replacement_k = lerp(k, k * iclr, iclr_mix_amt)
 
-        @nnx.scan(in_axes=(nnx.Carry, 0, 0, 0, 0, 0, 0), out_axes=(nnx.Carry, 0))
+        @nnx.scan(in_axes=(nnx.Carry, 1, 1, 1, 1, 1, 1), out_axes=(nnx.Carry, 0))
         def wkv_state_scan(wkv_state, decay_t, iclr_t, removal_k_t, replacement_k_t, v_t, r_t):
 
-            decay_t =           decay_t.reshape(N, H, 1)
-            iclr_t =            iclr_t.reshape(N, H, 1)
-            removal_k_t =       removal_k_t.reshape(N, H, 1)
-            replacement_k_t =   replacement_k_t.reshape(N, H, 1)
-            v_t =               v_t.reshape(N, H, 1)
-            r_t =               r_t.reshape(N, H, 1)
+            decay_t =           decay_t.reshape(B, N, H, 1)
+            iclr_t =            iclr_t.reshape(B, N, H, 1)
+            removal_k_t =       removal_k_t.reshape(B, N, H, 1)
+            replacement_k_t =   replacement_k_t.reshape(B, N, H, 1)
+            v_t =               v_t.reshape(B, N, H, 1)
+            r_t =               r_t.reshape(B, N, H, 1)
 
             wkv_state = wkv_state * decay_t.mT - wkv_state @ removal_k_t @ (iclr_t * removal_k_t).mT
             wkv_state = wkv_state + v_t @ replacement_k_t.mT
             y = wkv_state @ r_t
 
-            return wkv_state, y.reshape(C)
+            return wkv_state, y.reshape(B, C)
 
         wkv_state, out = wkv_state_scan(
             state.wkv_state[layer_idx],
@@ -205,11 +205,12 @@ class TimeMix(nnx.Module):
             replacement_k, v, r
         )
 
-        # [T, C]        
-        out = self.group_norm(out) 
+        # [T, B, C]
+        out = out.transpose(1, 0, 2)
+        out = self.group_norm(out)
 
         bonus = jnp.sum(r * k * self.bonus_multiplier.astype(k.dtype), axis=-1, keepdims=True) * v
-        bonus = bonus.reshape(T, C)
+        bonus = bonus.reshape(B, T, C)
         out = (out + bonus) * gate.astype(jnp.float32)
 
         out = QArrayImpl(out, x.tgrid)
@@ -240,8 +241,8 @@ class ChannelMix(nnx.Module):
         layer_idx = self.layer_idx
 
         cm_state = state.cm_state[layer_idx]
-        x_shifted = QArrayImpl.concat([cm_state, x[:-1, :]], axis=0)
-        cm_state = x[-1:, :]
+        x_shifted = QArrayImpl.concat([cm_state, x[:, :-1, :]], axis=1)
+        cm_state = x[:, -1:, :]
 
         _x = x.astype(jnp.float32)
         _x_shifted = x_shifted.astype(jnp.float32)

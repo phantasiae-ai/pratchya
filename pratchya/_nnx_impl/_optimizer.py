@@ -6,8 +6,7 @@ from flax.struct import dataclass
 from typing import NamedTuple, Any
 from jax.typing import ArrayLike, DTypeLike
 
-from .._qualia import block_quantize
-from ._utils import dequantize_cast
+from .._qualia import QArrayImpl
 
 
 def newton_schulz(G, steps=5):
@@ -33,8 +32,7 @@ def newton_schulz(G, steps=5):
 
 class MiulionState(NamedTuple):
     count: ArrayLike
-    momentum: ArrayLike
-    momentum_sc: ArrayLike
+    momentum: QArrayImpl
 
 @dataclass
 class MiulionHyperParams:
@@ -68,30 +66,19 @@ def miulion_optimizer(hyperparams: MiulionHyperParams, scheduler: MiulionSchedul
     ns_steps = hyperparams.ns_steps
 
     def init_fn(params):
+        def make_momentum_leaf(p):
+            if isinstance(p, QArrayImpl):
+                tgrid = p.tgrid
+                m = jnp.zeros(p.shape, dtype=jnp.float32)
+                return QArrayImpl(m, tgrid)
+            else:
+                return jnp.zeros_like(p, dtype=jnp.float32)
         
-        def make_fp8_leaf(params):
-            size = params.size
-
-            n_blocks = (size + blksize - 1) // blksize
-
-            m_fp8 = jnp.zeros((n_blocks, blksize), dtype=jnp.float8_e4m3fn)
-            return m_fp8
-        
-        def make_scale_leaf(params):
-            size = params.size
-
-            n_blocks = (size + blksize - 1) // blksize
-
-            m_scale = jnp.ones((n_blocks, 1), dtype=params.dtype)
-            return m_scale
-        
-        momentum = jax.tree_util.tree_map(make_fp8_leaf, params)
-        momentum_sc = jax.tree_util.tree_map(make_scale_leaf, params)
+        momentum = jax.tree_util.tree_map(make_momentum_leaf, params, is_leaf=lambda p: isinstance(p, QArrayImpl))
 
         return MiulionState(
             count=jnp.zeros([], jnp.int32),
             momentum=momentum,
-            momentum_sc=momentum_sc
         )
 
 
@@ -116,23 +103,32 @@ def miulion_optimizer(hyperparams: MiulionHyperParams, scheduler: MiulionSchedul
                 
             return True
 
-        def update_leaf(path, g: ArrayLike, m: ArrayLike, m_sc: ArrayLike, param):
+        def update_leaf(path, g, m, param):
+            tgrid = None
+            if isinstance(param, QArrayImpl):
+                tgrid = param.tgrid
+                
+                if getattr(m, '__class__', None).__name__ == 'State' and not isinstance(m, QArrayImpl):
+                    m = QArrayImpl._tree_unflatten((True, tgrid), (m[0], m[1], m[2]))
+                
+                m = m.astype(jnp.float32)
+                g = g.astype(jnp.float32)
+
             orig_shape = g.shape
             orig_size = g.size
             flat_g = g.ravel()
-
-            blksize = m.shape[-1] // m_sc.shape[-1]
 
             pad_size = m.size - orig_size
             padded_flat_g = jnp.pad(flat_g, (0, pad_size)) if pad_size > 0 else flat_g
             g_blocked = padded_flat_g.reshape(m.shape)
 
-            m = dequantize_cast(m, m_sc, dtype=g.dtype)
-
             c_blocked = beta1 * m + (1.0 - beta1) * g_blocked
             new_m_blocked = beta2 * m + (1.0 - beta2) * g_blocked
 
-            new_m, new_m_sc = block_quantize(new_m_blocked, blksize)
+            new_m = new_m_blocked
+            if isinstance(param, QArrayImpl):
+                new_m = QArrayImpl(new_m_blocked, tgrid)
+
             c = c_blocked.ravel()[:orig_size].reshape(orig_shape)
 
             if should_use_muon(path, g):
@@ -143,20 +139,19 @@ def miulion_optimizer(hyperparams: MiulionHyperParams, scheduler: MiulionSchedul
                 u = jnp.sign(c)
                 update = -(lion_lr * u + lion_lr * weight_decay * param)
                 
-            return update, new_m, new_m_sc
+            return update, new_m
         
         results = jax.tree_util.tree_map_with_path(
-            update_leaf, updates, state.momentum, state.momentum_sc, params
+            update_leaf, updates, state.momentum, params,
+            is_leaf=lambda p: isinstance(p, QArrayImpl)
         )
 
-        new_updates = jax.tree_util.tree_map(lambda x: x[0], results, is_leaf=lambda x: isinstance(x, tuple))
-        new_m = jax.tree_util.tree_map(lambda x: x[1], results, is_leaf=lambda x: isinstance(x, tuple))
-        new_m_sc = jax.tree_util.tree_map(lambda x: x[2], results, is_leaf=lambda x: isinstance(x, tuple))
-
+        new_updates = jax.tree_util.tree_map(lambda x: x[0], results, is_leaf=lambda x: isinstance(x, tuple) and len(x) == 2)
+        new_m = jax.tree_util.tree_map(lambda x: x[1], results, is_leaf=lambda x: isinstance(x, tuple) and len(x) == 2)
+        
         new_state = MiulionState(
             count=state.count + 1,
-            momentum=new_m,
-            momentum_sc=new_m_sc
+            momentum=new_m
         )
 
         return new_updates, new_state

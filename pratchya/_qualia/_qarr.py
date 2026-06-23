@@ -29,10 +29,10 @@ class QArrayImpl:
             self.__value = value
 
         elif isinstance(value, QArrayImpl):
-            self.__tgrid = value._ArrayFP8__tgrid
-            self.__value = value._ArrayFP8__value
-            self.__sc_fp8 = value._ArrayFP8__sc_fp8
-            self.__sc_fp32 = value._ArrayFP8__sc_fp32
+            self.__tgrid = value._QArrayImpl__tgrid
+            self.__value = value._QArrayImpl__value
+            self.__sc_fp8 = value._QArrayImpl__sc_fp8
+            self.__sc_fp32 = value._QArrayImpl__sc_fp32
 
         else:
             assert tgrid is not None
@@ -46,7 +46,9 @@ class QArrayImpl:
         x, sc_fp8, sc_fp32 = quantize_impl(x, self.__tgrid)
         return x, sc_fp8, sc_fp32
 
-    def dequantize(self, dtype: DTypeLike):
+    def dequantize(self, dtype):
+        if self.__value.dtype != jnp.float8_e4m3fn:
+            return self.__value.astype(dtype)
         x = dequantize_impl(self.__value, self.__sc_fp8, self.__sc_fp32, dtype=dtype, tgrid=self.__tgrid)
         return x
     
@@ -162,36 +164,8 @@ class QArrayImpl:
         if not hasattr(self, '_QArrayImpl__tgrid'):
             return QArrayImpl(self.get_value()[idx], quant=False)
             
-        # We use pure JAX here instead of self.dequantize() (which calls a Pallas kernel).
-        # Pallas kernels are opaque to XLA, so it would force a full materialization of the array.
-        # By using pure JAX, XLA will push the `[idx]` slice ALL the way down through the reshapes
-        # and only dequantize the exact bytes you requested!
-        x_fp8 = self.__value
-        orig_shape = x_fp8.shape
-        if x_fp8.ndim == 1:
-            x_fp8 = x_fp8.reshape(1, orig_shape[0])
-        elif x_fp8.ndim == 0:
-            x_fp8 = x_fp8.reshape(1, 1)
-            
-        shape = x_fp8.shape
-        M, K = self.__sc_fp8.shape
-        a, b = self.__tgrid
-        
-        x_reshaped = x_fp8.reshape(*shape[:-2], shape[-2] // a, a, shape[-1] // b, b)
-        dims = list(range(x_reshaped.ndim))
-        x_reshaped = x_reshaped.transpose(*dims[:-4], dims[-4], dims[-2], dims[-3], dims[-1])
-        x_reshaped = x_reshaped.reshape(M, K, a, b)
-        
-        sc_fp8_reshaped = self.__sc_fp8.reshape(M, K, 1, 1).astype(jnp.float32)
-        sc_fp32_reshaped = self.__sc_fp32.reshape(M, 1, 1, 1)
-        
-        x_sc = sc_fp8_reshaped * sc_fp32_reshaped
-        x_out = x_reshaped.astype(jnp.float32) * x_sc / 256.0
-        
-        x_out = x_out.reshape(*shape[:-2], shape[-2] // a, shape[-1] // b, a, b)
-        x_out = x_out.transpose(*dims[:-4], dims[-4], dims[-2], dims[-3], dims[-1])
-        x_fp32 = x_out.reshape(*orig_shape)
-        
+        # Dequantize using the proper custom_vjp path, then slice
+        x_fp32 = self.dequantize(jnp.float32)
         sliced_x = x_fp32[idx]
         
         old_a, old_b = self.__tgrid
@@ -210,10 +184,10 @@ class QArrayImpl:
 
     def __neg__(self):
         new_obj = QArrayImpl.__new__(QArrayImpl)
-        new_obj._ArrayFP8__block_grid = self.__tgrid
-        new_obj._ArrayFP8__value = self.__value
-        new_obj._ArrayFP8__sc_fp8 = self.__sc_fp8
-        new_obj._ArrayFP8__sc_fp32 = -self.__sc_fp32
+        new_obj._QArrayImpl__tgrid = self.__tgrid
+        new_obj._QArrayImpl__value = self.__value
+        new_obj._QArrayImpl__sc_fp8 = self.__sc_fp8
+        new_obj._QArrayImpl__sc_fp32 = -self.__sc_fp32
         return new_obj
 
     def apply(self, func):
@@ -233,10 +207,10 @@ class QArrayImpl:
 
     def __abs__(self):
         new_obj = QArrayImpl.__new__(QArrayImpl)
-        new_obj._ArrayFP8__block_grid = self.__tgrid
-        new_obj._ArrayFP8__value = jnp.abs(self.__value)
-        new_obj._ArrayFP8__sc_fp8 = self.__sc_fp8
-        new_obj._ArrayFP8__sc_fp32 = jnp.abs(self.__sc_fp32)
+        new_obj._QArrayImpl__tgrid = self.__tgrid
+        new_obj._QArrayImpl__value = jnp.abs(self.__value)
+        new_obj._QArrayImpl__sc_fp8 = self.__sc_fp8
+        new_obj._QArrayImpl__sc_fp32 = jnp.abs(self.__sc_fp32)
         return new_obj
 
     def __repr__(self):
@@ -265,26 +239,6 @@ class QArrayImpl:
         if not hasattr(self, '_QArrayImpl__tgrid'):
             return self.get_value().astype(dtype)
         return self.dequantize(dtype)
-
-    @property
-    def mT(self):
-        grid = (self.__tgrid[1], self.__tgrid[0])
-        return QArrayImpl(self.astype(jnp.float32).mT, grid)
-
-    def apply(self, func):
-        fp32_val = self.dequantize(jnp.float32)
-        out_val = func(fp32_val)
-        
-        old_a, old_b = self.__tgrid
-        if out_val.ndim == 0:
-            H, W = 1, 1
-        elif out_val.ndim == 1:
-            H, W = 1, out_val.shape[0]
-        else:
-            H, W = out_val.shape[-2:]
-            
-        new_grid = (math.gcd(old_a, H), math.gcd(old_b, W))
-        return QArrayImpl(out_val, new_grid)
 
     @property
     def mT(self):
@@ -472,8 +426,14 @@ def quantize_impl_bwd(tgrid, res, g_out):
     _, out = res
     x_fp8, sc_fp8, sc_fp32 = out
     g_fp8, g_sc8, g_sc32 = g_out
-    # We dequantize the gradient g_fp8 using the PRIMAL scales!
-    g_f32 = dequantize_impl(g_fp8, sc_fp8, sc_fp32, jnp.float32, tgrid)
+    
+    if g_fp8.dtype != jnp.float8_e4m3fn:
+        return g_fp8,
+        
+    valid_sc8 = jnp.array(1.0, dtype=jnp.float8_e8m0fnu)
+    g_sc8 = jnp.where(jnp.isnan(g_sc8), valid_sc8, g_sc8)
+    
+    g_f32 = dequantize_impl(g_fp8, g_sc8, g_sc32, jnp.float32, tgrid)
     return g_f32,
 
 quantize_impl.defvjp(quantize_impl_fwd, quantize_impl_bwd)
@@ -510,7 +470,7 @@ def dequantize_impl(x_fp8: ArrayLike, sc_fp8: ArrayLike, sc_fp32: ArrayLike, dty
     x_reshaped = x_reshaped.transpose(*dims[:-4], dims[-4], dims[-2], dims[-3], dims[-1])
     
     x_reshaped = x_reshaped.reshape(M_total, K, a, b)
-    sc_fp8_reshaped = sc_fp8.reshape(M_total, 1, K, 1)
+    sc_fp8_reshaped = sc_fp8.reshape(M_total, K, 1, 1)
     sc_fp32_reshaped = sc_fp32.reshape(M_total, 1, 1, 1)
     
     if IS_CPU:
@@ -523,7 +483,7 @@ def dequantize_impl(x_fp8: ArrayLike, sc_fp8: ArrayLike, sc_fp32: ArrayLike, dty
             out_shape=jax.ShapeDtypeStruct(x_out.shape, x_out.dtype),
             in_specs=[
                 pl.BlockSpec((1, K, a, b), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
-                pl.BlockSpec((1, 1, K, 1), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
+                pl.BlockSpec((1, K, 1, 1), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
                 pl.BlockSpec((1, 1, 1, 1), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
             ],
             out_specs=pl.BlockSpec((1, K, a, b), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
@@ -545,8 +505,10 @@ def dequantize_impl_fwd(x_fp8, sc_fp8, sc_fp32, dtype, tgrid):
 def dequantize_impl_bwd(dtype, tgrid, res, g_out):
     sc_fp8, = res
     M, K = sc_fp8.shape
-    g_x_fp8, g_sc_fp8, g_sc_fp32 = quantize_impl(g_out, tgrid=tgrid)
-    return g_x_fp8, g_sc_fp8.reshape(M, K), g_sc_fp32.reshape(M, 1, 1)
+    g_x_fp8 = g_out.astype(jnp.float32)
+    g_sc_fp8 = jnp.zeros(sc_fp8.shape, jnp.float32)
+    g_sc_fp32 = jnp.zeros((M, 1, 1), jnp.float32)
+    return g_x_fp8, g_sc_fp8, g_sc_fp32
 
 dequantize_impl.defvjp(dequantize_impl_fwd, dequantize_impl_bwd)
 
@@ -640,13 +602,26 @@ def matmul_impl_bwd(block_grid_x, block_grid_y, res, g_out):
     g_x_f32 = g_out @ jnp.swapaxes(y_f32, -1, -2)
     g_y_f32 = jnp.swapaxes(x_f32, -1, -2) @ g_out
     
-    g_x_fp8, g_x_sc8, g_x_sc32 = quantize_impl(g_x_f32, tgrid=block_grid_x)
-    g_x_sc8 = g_x_sc8.reshape(*x_sc8.shape)
-    g_x_sc32 = g_x_sc32.reshape(*x_sc32.shape)
+    def reduce_broadcast(g, target_shape):
+        if g.shape == target_shape:
+            return g
+        axes = list(range(g.ndim - len(target_shape)))
+        for i, (gs, ts) in enumerate(zip(g.shape[len(axes):], target_shape)):
+            if ts == 1 and gs > 1:
+                axes.append(len(axes) + i)
+        g = jnp.sum(g, axis=tuple(axes))
+        return jnp.reshape(g, target_shape)
+
+    g_x_f32 = reduce_broadcast(g_x_f32, x_fp8.shape)
+    g_y_f32 = reduce_broadcast(g_y_f32, y_fp8.shape)
     
-    g_y_fp8, g_y_sc8, g_y_sc32 = quantize_impl(g_y_f32, tgrid=block_grid_y)
-    g_y_sc8 = g_y_sc8.reshape(*y_sc8.shape)
-    g_y_sc32 = g_y_sc32.reshape(*y_sc32.shape)
+    g_x_fp8 = g_x_f32
+    g_x_sc8 = jnp.zeros(x_sc8.shape, jnp.float32)
+    g_x_sc32 = jnp.zeros(x_sc32.shape, jnp.float32)
+    
+    g_y_fp8 = g_y_f32
+    g_y_sc8 = jnp.zeros(y_sc8.shape, jnp.float32)
+    g_y_sc32 = jnp.zeros(y_sc32.shape, jnp.float32)
     
     return g_x_fp8, g_x_sc8, g_x_sc32, g_y_fp8, g_y_sc8, g_y_sc32
 
@@ -737,13 +712,26 @@ def make_elementwise_impl(op):
         _, vjp_fn = jax.vjp(op, x_f32, y_f32)
         g_x_f32, g_y_f32 = vjp_fn(g_out)
         
-        g_x_fp8, g_x_sc8, g_x_sc32 = quantize_impl(g_x_f32, tgrid=tgrid)
-        g_x_sc8 = g_x_sc8.reshape(*x_sc8.shape)
-        g_x_sc32 = g_x_sc32.reshape(*x_sc32.shape)
+        def reduce_broadcast(g, target_shape):
+            if g.shape == target_shape:
+                return g
+            axes = list(range(g.ndim - len(target_shape)))
+            for i, (gs, ts) in enumerate(zip(g.shape[len(axes):], target_shape)):
+                if ts == 1 and gs > 1:
+                    axes.append(len(axes) + i)
+            g = jnp.sum(g, axis=tuple(axes))
+            return jnp.reshape(g, target_shape)
+            
+        g_x_f32 = reduce_broadcast(g_x_f32, x_fp8.shape)
+        g_y_f32 = reduce_broadcast(g_y_f32, y_fp8.shape)
         
-        g_y_fp8, g_y_sc8, g_y_sc32 = quantize_impl(g_y_f32, tgrid=tgrid)
-        g_y_sc8 = g_y_sc8.reshape(*y_sc8.shape)
-        g_y_sc32 = g_y_sc32.reshape(*y_sc32.shape)
+        g_x_fp8 = g_x_f32
+        g_x_sc8 = jnp.zeros(x_sc8.shape, jnp.float32)
+        g_x_sc32 = jnp.zeros(x_sc32.shape, jnp.float32)
+        
+        g_y_fp8 = g_y_f32
+        g_y_sc8 = jnp.zeros(y_sc8.shape, jnp.float32)
+        g_y_sc32 = jnp.zeros(y_sc32.shape, jnp.float32)
         
         return g_x_fp8, g_x_sc8, g_x_sc32, g_y_fp8, g_y_sc8, g_y_sc32
 

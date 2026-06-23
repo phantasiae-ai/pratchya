@@ -33,10 +33,10 @@ class PratchyaModel(nnx.Module):
 
     def __call__(self, input_ids: jax.Array, state: PratchyaState):
 
-        T = input_ids.shape[-1]
+        B, T = input_ids.shape
 
         if state is None:
-            state = init_state(self.config)
+            state = init_state(self.config, B)
 
         t_positions = state.step + jnp.arange(T, dtype=jnp.int32)
 
