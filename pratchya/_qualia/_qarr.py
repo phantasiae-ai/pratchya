@@ -338,12 +338,12 @@ def quantize_kernel(x_ref, x_out_ref, sc_fp8_ref, sc_fp32_ref):
     
     S_1i_f32 = m_i_tmp / M_j
     S_1i_f32 = jnp.maximum(S_1i_f32, FP32_MIN.astype(M_j.dtype))
-    S_1i = S_1i_f32.astype(jnp.float8_e8m0fnu)
+    S_1i = S_1i_f32.astype(jnp.bfloat16).astype(jnp.float8_e8m0fnu)
     
-    S_eff = (S_1i.astype(M_j.dtype) * M_j).reshape(-1, 1, 1)
+    S_eff = (S_1i.astype(jnp.bfloat16).astype(M_j.dtype) * M_j).reshape(-1, 1, 1)
     S_eff = jnp.maximum(S_eff, 1e-7)
     
-    x_out = (x / S_eff * 256.0).astype(jnp.float8_e4m3fn)
+    x_out = (x / S_eff * 256.0).astype(jnp.bfloat16).astype(jnp.float8_e4m3fn)
     
     x_out_ref[...] = x_out
     sc_fp8_ref[...] = S_1i.reshape(1, 1, sc_fp8_ref.shape[-2], sc_fp8_ref.shape[-1])
@@ -378,7 +378,7 @@ def quantize_impl(x: ArrayLike, tgrid: Tuple = (128, 128)):
     
     x_reshaped = x_reshaped.reshape(M, K, a, b)
     
-    if IS_CPU:
+    if not IS_TPU:
         m_i = jnp.max(jnp.abs(x_reshaped), axis=(-2, -1), keepdims=True)
         m_i = jnp.maximum(m_i, FP8E8M0_MIN.astype(m_i.dtype))
         M_j = jnp.max(m_i, axis=(-3, -2, -1), keepdims=True)
@@ -444,10 +444,8 @@ def dequantize_kernel(x_ref, sc_fp8_ref, sc_fp32_ref, o_ref):
     sc_fp8 = sc_fp8_ref[...]
     sc_fp32 = sc_fp32_ref[...]
     
-    x_sc = sc_fp8.astype(jnp.float32)
-    x_sc = (x_sc * sc_fp32).reshape(-1, 1, 1)
-    
-    o_ref[...] = x.astype(jnp.float32) * x_sc / 256.0
+    x_sc = sc_fp8.astype(jnp.bfloat16).astype(jnp.float32) * sc_fp32
+    o_ref[...] = x.astype(jnp.bfloat16).astype(jnp.float32) * x_sc / 256.0
 
 
 @functools.partial(jax.jit, static_argnames=['dtype', 'tgrid'])
@@ -473,7 +471,7 @@ def dequantize_impl(x_fp8: ArrayLike, sc_fp8: ArrayLike, sc_fp32: ArrayLike, dty
     sc_fp8_reshaped = sc_fp8.reshape(M_total, K, 1, 1)
     sc_fp32_reshaped = sc_fp32.reshape(M_total, 1, 1, 1)
     
-    if IS_CPU:
+    if not IS_TPU:
         x_sc = sc_fp8_reshaped.astype(jnp.float32) * sc_fp32_reshaped
         x_out = x_reshaped.astype(jnp.float32) * x_sc / 256.0
     else:
@@ -521,8 +519,8 @@ def matmul_kernel(x_ref, y_ref, sc_x8_ref, sc_x32_ref, sc_y8_ref, sc_y32_ref, o_
         sc_x32 = jax.lax.dynamic_slice(sc_x32_ref[...], (0, k), (1, 1))[0, 0]
         sc_y8 = jax.lax.dynamic_slice(sc_y8_ref[...], (k, 0), (1, 1))[0, 0]
         sc_y32 = jax.lax.dynamic_slice(sc_y32_ref[...], (k, 0), (1, 1))[0, 0]
-        scale_x = sc_x8.astype(jnp.float32) * sc_x32
-        scale_y = sc_y8.astype(jnp.float32) * sc_y32
+        scale_x = sc_x8.astype(jnp.bfloat16).astype(jnp.float32) * sc_x32
+        scale_y = sc_y8.astype(jnp.bfloat16).astype(jnp.float32) * sc_y32
         prod = jnp.matmul(x_block, y_block, preferred_element_type=jnp.float32)
         prod = prod * (scale_x * scale_y) / 65536.0
         return acc + prod
@@ -557,8 +555,8 @@ def matmul_impl(x_fp8, x_sc8, x_sc32, y_fp8, y_sc8, y_sc32, block_grid_x: Tuple,
     a, b = block_grid_x
     b2, c = block_grid_y
     
-    if b != b2 or H_a % a != 0 or W_a % b != 0 or H_b % b2 != 0 or W_b % c != 0:
-        # Graceful fallback to pure JAX if grids are totally misaligned
+    if not IS_TPU or b != b2 or H_a % a != 0 or W_a % b != 0 or H_b % b2 != 0 or W_b % c != 0:
+        # Graceful fallback to pure JAX if grids are totally misaligned or running on non-TPU
         x_f32 = dequantize_impl(x_fp8, x_sc8, x_sc32, jnp.float32, block_grid_x)
         y_f32 = dequantize_impl(y_fp8, y_sc8, y_sc32, jnp.float32, block_grid_y)
         return jnp.matmul(x_f32, y_f32)
@@ -636,11 +634,11 @@ def elementwise_kernel(x_ref, y_ref, sc_x8_ref, sc_x32_ref, sc_y8_ref, sc_y32_re
     sc_y8 = sc_y8_ref[...]
     sc_y32 = sc_y32_ref[...]
     
-    scale_x = sc_x8.astype(jnp.float32) * sc_x32 / 256.0
-    scale_y = sc_y8.astype(jnp.float32) * sc_y32 / 256.0
+    scale_x = sc_x8.astype(jnp.bfloat16).astype(jnp.float32) * sc_x32 / 256.0
+    scale_y = sc_y8.astype(jnp.bfloat16).astype(jnp.float32) * sc_y32 / 256.0
     
-    x_val = x_block.astype(jnp.float32) * scale_x
-    y_val = y_block.astype(jnp.float32) * scale_y
+    x_val = x_block.astype(jnp.bfloat16).astype(jnp.float32) * scale_x
+    y_val = y_block.astype(jnp.bfloat16).astype(jnp.float32) * scale_y
     o_ref[...] = op(x_val, y_val)
 
 def elementwise_impl_2d(x_fp8, sc_x8, sc_x32, y_fp8, sc_y8, sc_y32, *, a, b, op):
@@ -671,12 +669,22 @@ def make_elementwise_impl(op):
         
         orig_batch_x = x_fp8.shape[:-2]
         orig_batch_y = y_fp8.shape[:-2]
-        batch_shape = jnp.broadcast_shapes(orig_batch_x, orig_batch_y)
-        
+        orig_batch_x = x_fp8.shape[:-2] if x_fp8.ndim >= 2 else ()
+        orig_batch_y = y_fp8.shape[:-2] if y_fp8.ndim >= 2 else ()
         orig_H_x = x_fp8.shape[-2] if x_fp8.ndim >= 2 else 1
         orig_W_x = x_fp8.shape[-1] if x_fp8.ndim >= 1 else 1
         orig_H_y = y_fp8.shape[-2] if y_fp8.ndim >= 2 else 1
         orig_W_y = y_fp8.shape[-1] if y_fp8.ndim >= 1 else 1
+        
+        if not IS_TPU or orig_H_x % a != 0 or orig_W_x % b != 0 or orig_H_y % a != 0 or orig_W_y % b != 0:
+            x_f32 = dequantize_impl(x_fp8, x_sc8, x_sc32, jnp.float32, tgrid)
+            y_f32 = dequantize_impl(y_fp8, y_sc8, y_sc32, jnp.float32, tgrid)
+            out_f32 = op(x_f32, y_f32)
+            return out_f32
+            
+        K_x = x_sc8.shape[1]
+        K_y = y_sc8.shape[1]
+        batch_shape = jnp.broadcast_shapes(orig_batch_x, orig_batch_y)
         
         H, W = x_fp8.shape[-2:] if x_fp8.ndim >= 2 else (1, x_fp8.shape[-1] if x_fp8.ndim == 1 else 1)
         x_fp8 = jnp.broadcast_to(x_fp8, (*batch_shape, H, W)).reshape(-1, H, W)
