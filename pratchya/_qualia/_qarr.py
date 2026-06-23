@@ -380,38 +380,24 @@ def quantize_impl(x: ArrayLike, tgrid: Tuple = (128, 128)):
     
     x_reshaped = x_reshaped.reshape(M, K, a, b)
     
-    if not IS_TPU:
-        m_i = jnp.max(jnp.abs(x_reshaped), axis=(-2, -1), keepdims=True)
-        m_i = jnp.maximum(m_i, FP8E8M0_MIN.astype(m_i.dtype))
-        M_j = jnp.max(m_i, axis=(-3, -2, -1), keepdims=True)
-        M_j = jnp.maximum(M_j, FP32_MIN.astype(M_j.dtype))
-        S_1i_f32 = m_i / M_j
-        S_1i_f32 = jnp.maximum(S_1i_f32, FP32_MIN.astype(M_j.dtype))
-        sc_fp8 = S_1i_f32.astype(jnp.float8_e8m0fnu)
-        S_eff = (sc_fp8.astype(M_j.dtype) * M_j)
-        S_eff = jnp.maximum(S_eff, 1e-7)
-        x_fp8 = (x_reshaped / S_eff * 256.0).astype(jnp.float8_e4m3fn)
-        sc_fp8 = sc_fp8.reshape(M, 1, K, 1)
-        sc_fp32 = M_j.reshape(M, 1, 1, 1)
-    else:
-        x_fp8, sc_fp8, sc_fp32 = pl.pallas_call(
-            quantize_kernel,
-            out_shape=(
-                jax.ShapeDtypeStruct(x_reshaped.shape, dtype=jnp.float8_e4m3fn),
-                jax.ShapeDtypeStruct((M, 1, K, 1), dtype=jnp.float8_e8m0fnu),
-                jax.ShapeDtypeStruct((M, 1, 1, 1), dtype=jnp.float32)
-            ),
-            in_specs=[
-                pl.BlockSpec((1, K, a, b), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE)
-            ],
-            out_specs=[
-                pl.BlockSpec((1, K, a, b), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
-                pl.BlockSpec((1, 1, K, 1), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
-                pl.BlockSpec((1, 1, 1, 1), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
-            ],
-            interpret=INTERPRET,
-            grid=(M,)
-        )(x_reshaped)
+    m_i = jnp.max(jnp.abs(x_reshaped), axis=(-2, -1), keepdims=True)
+    m_i = jnp.maximum(m_i, FP8E8M0_MIN.astype(m_i.dtype))
+    M_j = jnp.max(m_i, axis=(-3, -2, -1), keepdims=True)
+    M_j = jnp.maximum(M_j, FP32_MIN.astype(M_j.dtype))
+    S_1i_f32 = m_i / M_j
+    S_1i_f32 = jnp.maximum(S_1i_f32, FP32_MIN.astype(M_j.dtype))
+    
+    # Bitcast trick to avoid TPU f32->f8E8M0 compiler errors
+    S_1i_u32 = jax.lax.bitcast_convert_type(S_1i_f32, jnp.uint32)
+    S_1i = jax.lax.bitcast_convert_type((S_1i_u32 >> 23).astype(jnp.uint8), jnp.float8_e8m0fnu)
+    
+    S_1i_f32_q = jax.lax.bitcast_convert_type(jax.lax.bitcast_convert_type(S_1i, jnp.uint8).astype(jnp.uint32) << 23, jnp.float32)
+    S_eff = (S_1i_f32_q * M_j).reshape(M, K, 1, 1)
+    S_eff = jnp.maximum(S_eff, 1e-7)
+    
+    x_fp8 = (x_reshaped / S_eff * 256.0).astype(jnp.bfloat16).astype(jnp.float8_e4m3fn)
+    sc_fp8 = S_1i.reshape(M, 1, K, 1)
+    sc_fp32 = M_j.reshape(M, 1, 1, 1)
 
     x_fp8 = x_fp8.reshape(*shape[:-2], shape[-2] // a, shape[-1] // b, a, b)
     x_fp8 = x_fp8.transpose(*dims[:-4], dims[-4], dims[-2], dims[-3], dims[-1])
@@ -474,23 +460,9 @@ def dequantize_impl(x_fp8: ArrayLike, sc_fp8: ArrayLike, sc_fp32: ArrayLike, dty
     sc_fp8_reshaped = sc_fp8.reshape(M_total, K, 1, 1)
     sc_fp32_reshaped = sc_fp32.reshape(M_total, 1, 1, 1)
     
-    if not IS_TPU:
-        x_sc = sc_fp8_reshaped.astype(jnp.float32) * sc_fp32_reshaped
-        x_out = x_reshaped.astype(jnp.float32) * x_sc / 256.0
-    else:
-        x_out = jnp.zeros(x_reshaped.shape, dtype=jnp.float32)
-        pl.pallas_call(
-            dequantize_kernel,
-            out_shape=jax.ShapeDtypeStruct(x_out.shape, x_out.dtype),
-            in_specs=[
-                pl.BlockSpec((1, K, a, b), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
-                pl.BlockSpec((1, K, 1, 1), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
-                pl.BlockSpec((1, 1, 1, 1), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
-            ],
-            out_specs=pl.BlockSpec((1, K, a, b), lambda i: (i, 0, 0, 0), memory_space=MEM_SPACE),
-            interpret=INTERPRET,
-            grid=(M_total,)
-        )(x_reshaped, sc_fp8_reshaped, sc_fp32_reshaped, out=x_out)
+    sc_fp8_f32 = jax.lax.bitcast_convert_type(jax.lax.bitcast_convert_type(sc_fp8_reshaped, jnp.uint8).astype(jnp.uint32) << 23, jnp.float32)
+    x_sc = sc_fp8_f32 * sc_fp32_reshaped
+    x_out = x_reshaped.astype(jnp.bfloat16).astype(jnp.float32) * x_sc / 256.0
 
     x_out = x_out.reshape(*shape[:-2], shape[-2] // a, shape[-1] // b, a, b)
     x_out = x_out.transpose(*dims[:-4], dims[-4], dims[-2], dims[-3], dims[-1])
