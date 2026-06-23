@@ -465,11 +465,7 @@ def dequantize_impl_fwd(x_fp8, sc_fp8, sc_fp32, dtype, tgrid):
     return out, (sc_fp8,)
 
 def dequantize_impl_bwd(dtype, tgrid, res, g_out):
-    sc_fp8, = res
-    M, K = sc_fp8.shape
-    g_x_fp8 = g_out.astype(jnp.float32)
-    g_sc_fp8 = jnp.zeros(sc_fp8.shape, jnp.float32)
-    g_sc_fp32 = jnp.zeros((M, 1, 1), jnp.float32)
+    g_x_fp8, g_sc_fp8, g_sc_fp32 = quantize_impl(g_out, tgrid)
     return g_x_fp8, g_sc_fp8, g_sc_fp32
 
 dequantize_impl.defvjp(dequantize_impl_fwd, dequantize_impl_bwd)
