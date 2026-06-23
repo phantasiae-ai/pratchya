@@ -8,20 +8,28 @@ import jax, jax.numpy as jnp
 from flax import nnx
 import optax
 
-hyperparams = MiulionHyperParams()
-
-cosine_muon = optax.cosine_decay_schedule(
-    init_value=hyperparams.muon_lr,
-    decay_steps=hyperparams.total_steps,
-    alpha=0.0
+hyperparams = MiulionHyperParams(
+    lion_lr=1e-4,  # Safer LR for 500M
+    muon_lr=1e-3,  # Safer LR for 500M
+    total_steps=1000
 )
 
-cosine_lion = optax.cosine_decay_schedule(
-    init_value=hyperparams.lion_lr,
+cosine_muon = optax.warmup_cosine_decay_schedule(
+    init_value=0.0,
+    peak_value=hyperparams.muon_lr,
+    warmup_steps=100,
     decay_steps=hyperparams.total_steps,
-    alpha=0.0
+    end_value=0.0
 )
-## NOT USED WARMUP STEP YET!
+
+cosine_lion = optax.warmup_cosine_decay_schedule(
+    init_value=0.0,
+    peak_value=hyperparams.lion_lr,
+    warmup_steps=100,
+    decay_steps=hyperparams.total_steps,
+    end_value=0.0
+)
+
 schedule = MiulionScheduler(
     muon_schedule=cosine_muon,
     lion_schedule=cosine_lion,
@@ -29,6 +37,7 @@ schedule = MiulionScheduler(
 )
 
 tx = miulion_optimizer(hyperparams, schedule)
+
 model = PratchyaCausalLM(PratchyaDummyConfig, rngs=nnx.Rngs(0))
 param_arrays = nnx.state(model, nnx.Param)
 opt_state = tx.init(param_arrays)
