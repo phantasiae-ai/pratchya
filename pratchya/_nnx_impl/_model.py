@@ -44,7 +44,7 @@ class PratchyaModel(nnx.Module):
         x = self.pre_rmsnorm(x)
 
         v = jnp.zeros_like(x, jnp.float32)
-        for layer in self.blocks:
+        for i, layer in enumerate(self.blocks):
             x, v, state = layer(x, v, t_positions, state)
 
         x = self.final_rmsnorm(x)

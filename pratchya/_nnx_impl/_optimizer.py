@@ -67,6 +67,9 @@ def miulion_optimizer(hyperparams: MiulionHyperParams, scheduler: MiulionSchedul
 
     def init_fn(params):
         def make_momentum_leaf(p):
+            if getattr(p, 'dtype', None) == jnp.float8_e8m0fnu:
+                from pratchya._qualia._qarr import FP8E8M0_MIN
+                return jnp.full_like(p, FP8E8M0_MIN, dtype=p.dtype)
             if jnp.issubdtype(p.dtype, jnp.floating) and p.dtype not in (jnp.float8_e4m3fn, jnp.float8_e8m0fnu):
                 return jnp.zeros_like(p, dtype=jnp.float32)
             return jnp.zeros_like(p)
@@ -131,10 +134,12 @@ def miulion_optimizer(hyperparams: MiulionHyperParams, scheduler: MiulionSchedul
             if should_use_muon(path, g):
                 u = newton_schulz(c, steps=ns_steps)
                 scale_factor = jnp.sqrt(jnp.maximum(orig_shape[0], orig_shape[1]))
-                update = -(muon_lr * (u * scale_factor) + muon_lr * weight_decay * param)
+                p_f32 = param.astype(jnp.float32) if isinstance(param, QArrayImpl) else param
+                update = -(muon_lr * (u * scale_factor) + muon_lr * weight_decay * p_f32)
             else:
                 u = jnp.sign(c)
-                update = -(lion_lr * u + lion_lr * weight_decay * param)
+                p_f32 = param.astype(jnp.float32) if isinstance(param, QArrayImpl) else param
+                update = -(lion_lr * u + lion_lr * weight_decay * p_f32)
                 
             return update, new_m
         

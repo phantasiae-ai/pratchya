@@ -47,11 +47,20 @@ def train_step(model: nnx.Module, opt_state, batch):
     updates, new_opt_state = tx.update(grad_arrays, opt_state, param_arrays)
 
     from pratchya._qualia._qarr import QArrayImpl
+
+    step_num = opt_state.count
+
+    def add_param(p, u):
+        if isinstance(p, QArrayImpl):
+            return QArrayImpl(p.astype(jnp.float32) + u, p.tgrid)
+        return p + u
+
     new_params = jax.tree_util.tree_map(
-        lambda p, u: p + u,
+        add_param,
         param_arrays, updates,
         is_leaf=lambda x: isinstance(x, QArrayImpl)
     )
+
     nnx.update(model, new_params)
     
     return loss, new_opt_state
