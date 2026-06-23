@@ -384,7 +384,7 @@ def quantize_impl(x: ArrayLike, tgrid: Tuple = (128, 128)):
     S_eff = (S_1i_f32_q * M_j_f32).reshape(M, K, 1, 1)
     S_eff = jnp.maximum(S_eff, 1e-7)
     
-    x_fp8 = (x_reshaped / S_eff * 256.0).astype(jnp.bfloat16).astype(jnp.float8_e4m3fn)
+    x_fp8 = (x_reshaped / S_eff * 128.0).astype(jnp.bfloat16).astype(jnp.float8_e4m3fn)
     sc_fp8 = S_1i.reshape(M, 1, K, 1)
     sc_fp32 = M_j_f32.reshape(M, 1, 1, 1)
 
@@ -451,7 +451,7 @@ def dequantize_impl(x_fp8: ArrayLike, sc_fp8: ArrayLike, sc_fp32: ArrayLike, dty
     
     sc_fp8_f32 = jax.lax.bitcast_convert_type(jax.lax.bitcast_convert_type(sc_fp8_reshaped, jnp.uint8).astype(jnp.uint32) << 23, jnp.float32)
     x_sc = sc_fp8_f32 * sc_fp32_reshaped
-    x_out = x_reshaped.astype(jnp.bfloat16).astype(jnp.float32) * x_sc / 256.0
+    x_out = x_reshaped.astype(jnp.bfloat16).astype(jnp.float32) * x_sc / 128.0
 
     x_out = x_out.reshape(*shape[:-2], shape[-2] // a, shape[-1] // b, a, b)
     x_out = x_out.transpose(*dims[:-4], dims[-4], dims[-2], dims[-3], dims[-1])
