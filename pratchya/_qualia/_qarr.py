@@ -506,13 +506,8 @@ def matmul_impl_bwd(block_grid_x, block_grid_y, res, g_out):
     g_x_f32 = reduce_broadcast(g_x_f32, x_fp8.shape)
     g_y_f32 = reduce_broadcast(g_y_f32, y_fp8.shape)
     
-    g_x_fp8 = g_x_f32
-    g_x_sc8 = jnp.zeros(x_sc8.shape, jnp.float32)
-    g_x_sc32 = jnp.zeros(x_sc32.shape, jnp.float32)
-    
-    g_y_fp8 = g_y_f32
-    g_y_sc8 = jnp.zeros(y_sc8.shape, jnp.float32)
-    g_y_sc32 = jnp.zeros(y_sc32.shape, jnp.float32)
+    g_x_fp8, g_x_sc8, g_x_sc32 = quantize_impl(g_x_f32, block_grid_x)
+    g_y_fp8, g_y_sc8, g_y_sc32 = quantize_impl(g_y_f32, block_grid_y)
     
     return g_x_fp8, g_x_sc8, g_x_sc32, g_y_fp8, g_y_sc8, g_y_sc32
 
@@ -553,13 +548,8 @@ def make_elementwise_impl(op):
         g_x_f32 = reduce_broadcast(g_x_f32, x_fp8.shape)
         g_y_f32 = reduce_broadcast(g_y_f32, y_fp8.shape)
         
-        g_x_fp8 = g_x_f32
-        g_x_sc8 = jnp.zeros(x_sc8.shape, jnp.float32)
-        g_x_sc32 = jnp.zeros(x_sc32.shape, jnp.float32)
-        
-        g_y_fp8 = g_y_f32
-        g_y_sc8 = jnp.zeros(y_sc8.shape, jnp.float32)
-        g_y_sc32 = jnp.zeros(y_sc32.shape, jnp.float32)
+        g_x_fp8, g_x_sc8, g_x_sc32 = quantize_impl(g_x_f32, tgrid)
+        g_y_fp8, g_y_sc8, g_y_sc32 = quantize_impl(g_y_f32, tgrid)
         
         return g_x_fp8, g_x_sc8, g_x_sc32, g_y_fp8, g_y_sc8, g_y_sc32
 

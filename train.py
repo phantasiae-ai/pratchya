@@ -29,7 +29,7 @@ schedule = MiulionScheduler(
 )
 
 tx = miulion_optimizer(hyperparams, schedule)
-model = PratchyaCausalLM(Pratchya500M, rngs=nnx.Rngs(0))
+model = PratchyaCausalLM(PratchyaDummyConfig, rngs=nnx.Rngs(0))
 param_arrays = nnx.state(model, nnx.Param)
 opt_state = tx.init(param_arrays)
 
