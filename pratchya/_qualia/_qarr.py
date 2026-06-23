@@ -369,24 +369,24 @@ def quantize_impl(x: ArrayLike, tgrid: Tuple = (128, 128)):
     
     x_reshaped = x_reshaped.reshape(M, K, a, b)
     
-    m_i = jnp.max(jnp.abs(x_reshaped), axis=(-2, -1), keepdims=True)
-    m_i = jnp.maximum(m_i, FP8E8M0_MIN.astype(m_i.dtype))
-    M_j = jnp.max(m_i, axis=(-3, -2, -1), keepdims=True)
-    M_j = jnp.maximum(M_j, FP32_MIN.astype(M_j.dtype))
-    S_1i_f32 = m_i / M_j
-    S_1i_f32 = jnp.maximum(S_1i_f32, FP32_MIN.astype(M_j.dtype))
+    m_i_f32 = jnp.max(jnp.abs(x_reshaped), axis=(-2, -1), keepdims=True).astype(jnp.float32)
+    M_j_f32 = jnp.max(m_i_f32, axis=(-3, -2, -1), keepdims=True)
+    
+    # Avoid division by zero when the entire array is zero
+    safe_M_j = jnp.where(M_j_f32 == 0.0, 1.0, M_j_f32)
+    S_1i_f32 = m_i_f32 / safe_M_j
     
     # Bitcast trick to avoid TPU f32->f8E8M0 compiler errors
     S_1i_u32 = jax.lax.bitcast_convert_type(S_1i_f32, jnp.uint32)
     S_1i = jax.lax.bitcast_convert_type((S_1i_u32 >> 23).astype(jnp.uint8), jnp.float8_e8m0fnu)
     
     S_1i_f32_q = jax.lax.bitcast_convert_type(jax.lax.bitcast_convert_type(S_1i, jnp.uint8).astype(jnp.uint32) << 23, jnp.float32)
-    S_eff = (S_1i_f32_q * M_j).reshape(M, K, 1, 1)
+    S_eff = (S_1i_f32_q * M_j_f32).reshape(M, K, 1, 1)
     S_eff = jnp.maximum(S_eff, 1e-7)
     
     x_fp8 = (x_reshaped / S_eff * 256.0).astype(jnp.bfloat16).astype(jnp.float8_e4m3fn)
     sc_fp8 = S_1i.reshape(M, 1, K, 1)
-    sc_fp32 = M_j.reshape(M, 1, 1, 1)
+    sc_fp32 = M_j_f32.reshape(M, 1, 1, 1)
 
     x_fp8 = x_fp8.reshape(*shape[:-2], shape[-2] // a, shape[-1] // b, a, b)
     x_fp8 = x_fp8.transpose(*dims[:-4], dims[-4], dims[-2], dims[-3], dims[-1])
