@@ -381,10 +381,10 @@ def scale_by_muon(
         del params
     
         def update_leaf(g, m):
+            shape = g.shape
             c = b1 * m + (1.0 - b1) * g
-            # u = newton_schulz(c, steps=ns_steps)
-            u = c
-            scale_factor = jnp.sqrt(max(g.shape))
+            u = newton_schulz(c, steps=ns_steps)
+            scale_factor = jnp.sqrt(max(shape))
             update = u * scale_factor
                 
             return update
