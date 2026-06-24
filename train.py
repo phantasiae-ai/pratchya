@@ -2,7 +2,7 @@
 
 from pratchya._nnx_impl._optimizer import miulion_optimizer, MiulionHyperParams, MiulionScheduler
 from pratchya.preset import PratchyaDummyConfig, Pratchya500M
-from pratchya import PratchyaCausalLM
+from pratchya._nnx_impl._model import NQPratchyaCausalLM, PratchyaCausalLM
 
 import jax, jax.numpy as jnp
 from flax import nnx
@@ -38,7 +38,7 @@ schedule = MiulionScheduler(
 
 tx = miulion_optimizer(hyperparams, schedule)
 
-model = PratchyaCausalLM(PratchyaDummyConfig, rngs=nnx.Rngs(0))
+model = NQPratchyaCausalLM(PratchyaDummyConfig, rngs=nnx.Rngs(0))
 param_arrays = nnx.state(model, nnx.Param)
 opt_state = tx.init(param_arrays)
 

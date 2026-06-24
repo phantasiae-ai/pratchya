@@ -15,16 +15,14 @@ class PratchyaConfig:
     rmsnorm_epsilon: float = 1e-6
     n_layers: int = 2
     language_dtype: str = "float32"
-    param_dtype: str = "float32"
-    mu_dtype: str = "float32"
+    mu_dtype: str = "bfloat16"
     norm_dtype: str = "float32"
     lora_dtype: str = "float32"
-    gemm_dtype: str = "float32"
-    dtype: str = "float32"
+    dtype: str = "bfloat16"
+    act_dtype: str = "bfloat16"
+    wkv_dtype: str = "float32"
     blksize: int = 128
 
-    # RoPE
-    use_rope: bool = True # I think will drop this because will be used anyway ;P
     rope_theta: float = 1e+4
 
 @dataclass
@@ -33,6 +31,7 @@ class PratchyaState:
     cm_state: ArrayLike
     wkv_state: ArrayLike
     step: ArrayLike | None
+    layer_idx: int = 0
 
 @dataclass
 class PratchyaOutput:
