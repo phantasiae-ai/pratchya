@@ -356,3 +356,84 @@ def miulion_optimizer_nq(hyperparams: MiulionHyperParams, scheduler: MiulionSche
         return new_updates, new_state
     
     return optax.GradientTransformation(init_fn, update_fn)
+
+from optax._src import base, combine, transform, utils, numerics
+from typing import Optional, Union, Callable, Any, Literal
+
+
+class ScaleByMuonState(NamedTuple):
+    count: jax.typing.ArrayLike  # shape=(), dtype=jnp.int32.
+    mu: base.Updates
+
+
+def scale_by_muon(
+    b1: jax.typing.ArrayLike = 0.9,
+    b2: jax.typing.ArrayLike = 0.99,
+    mu_dtype: Optional[jax.typing.DTypeLike] = None,
+    *, ns_steps: int = 5
+):
+    mu_dtype = utils.canonicalize_dtype(mu_dtype)
+
+    def init_fn(params):
+        mu = optax.tree.zeros_like(params, dtype=mu_dtype)  # moment
+        return ScaleByMuonState(count=jnp.zeros([], jnp.int32), mu=mu)
+    
+    def update_fn(updates, state, params=None):
+        del params
+    
+        def update_leaf(g, m):
+            c = b1 * m + (1.0 - b1) * g
+            u = newton_schulz(c, steps=ns_steps)
+            scale_factor = jnp.sqrt(max(g.shape))
+            update = u * scale_factor
+                
+            return update
+
+        mu = optax.tree.update_moment(updates, state.mu, b2, 1)
+        count_inc = numerics.safe_increment(state.count)
+        updates = jax.tree.map(update_leaf, updates, mu)
+
+        return updates, ScaleByMuonState(count=count_inc, mu=mu)
+
+    return base.GradientTransformation(init_fn, update_fn)
+
+
+def muon(
+    learning_rate: base.ScalarOrSchedule,
+    b1: jax.typing.ArrayLike = 0.9,
+    b2: jax.typing.ArrayLike = 0.99,
+    mu_dtype: Optional[jax.typing.DTypeLike] = None,
+    weight_decay: base.ScalarOrSchedule = 1e-4,
+    mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
+    *, ns_steps: int = 5
+):
+
+    return combine.chain(
+        scale_by_muon(b1, b2, mu_dtype, ns_steps=ns_steps),
+        transform.add_decayed_weights(weight_decay, mask),
+        transform.scale_by_learning_rate(learning_rate),
+    )
+
+
+def miulion_optimizer_v2(
+    model: nnx.Module,
+    lion_tx, muon_tx
+):
+    def label_fn(path, leaf):
+        name = ".".join([str(p.key) for p in path if hasattr(p, 'key')]).lower()
+        if leaf.ndim == 2 and "embedding" not in name and "lm_head" not in name:
+            return "muon_path"
+        return "lion_path"
+    
+    def unwrap(x):
+        return x.get_value() if hasattr(x, 'get_value') else x.value if hasattr(x, 'value') else x
+        
+    state = nnx.state(model, nnx.Param)
+    state_unwrapped = jax.tree_util.tree_map(unwrap, state, is_leaf=lambda x: isinstance(x, nnx.Variable))
+    param_labels = jax.tree_util.tree_map_with_path(label_fn, state_unwrapped)
+    tx = optax.partition(
+        transforms={"lion_path": lion_tx, "muon_path": muon_tx},
+        param_labels=param_labels
+    )
+    return tx
+
