@@ -442,7 +442,7 @@ def dequantize_kernel(x_ref, sc_fp8_ref, sc_fp32_ref, o_ref):
     o_ref[...] = x.astype(jnp.bfloat16).astype(jnp.float32) * x_sc / 256.0
 
 
-@functools.partial(jax.jit, static_argnames=['dtype', 'tgrid'])
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4))
 def dequantize_impl(x_fp8: ArrayLike, sc_fp8: ArrayLike, sc_fp32: ArrayLike, dtype: DTypeLike, tgrid: Tuple):
     orig_shape = x_fp8.shape
     if x_fp8.ndim == 1:
@@ -472,15 +472,37 @@ def dequantize_impl(x_fp8: ArrayLike, sc_fp8: ArrayLike, sc_fp32: ArrayLike, dty
 
     return x_out.reshape(*orig_shape).astype(dtype)
 
-dequantize_impl = jax.custom_vjp(dequantize_impl, nondiff_argnums=(3, 4))
-
 def dequantize_impl_fwd(x_fp8, sc_fp8, sc_fp32, dtype, tgrid):
     out = dequantize_impl(x_fp8, sc_fp8, sc_fp32, dtype, tgrid)
-    return out, (sc_fp8,)
+    return out, (sc_fp8, sc_fp32)
 
 def dequantize_impl_bwd(dtype, tgrid, res, g_out):
-    g_x_fp8, g_sc_fp8, g_sc_fp32 = quantize_impl(g_out, tgrid)
-    return g_x_fp8, g_sc_fp8, g_sc_fp32
+    sc_fp8, sc_fp32 = res
+    M, K = sc_fp8.shape[-2:]
+    a, b = tgrid
+    shape = g_out.shape
+    
+    g_reshaped = g_out.astype(jnp.float32)
+    if g_reshaped.ndim == 1:
+        g_reshaped = g_reshaped.reshape(1, shape[0])
+    elif g_reshaped.ndim == 0:
+        g_reshaped = g_reshaped.reshape(1, 1)
+        
+    g_reshaped = g_reshaped.reshape(*shape[:-2], shape[-2] // a, a, shape[-1] // b, b)
+    dims = list(range(g_reshaped.ndim))
+    g_reshaped = g_reshaped.transpose(*dims[:-4], dims[-4], dims[-2], dims[-3], dims[-1])
+    g_reshaped = g_reshaped.reshape(*shape[:-2], M, K, a, b)
+    
+    sc_fp8_reshaped = sc_fp8.reshape(*shape[:-2], M, K, 1, 1)
+    sc_fp32_reshaped = sc_fp32.reshape(*shape[:-2], M, 1, 1, 1)
+    sc_fp8_f32 = jax.lax.bitcast_convert_type(jax.lax.bitcast_convert_type(sc_fp8_reshaped, jnp.uint8).astype(jnp.uint32) << 23, jnp.float32)
+    x_sc = sc_fp8_f32 * sc_fp32_reshaped
+    
+    g_x = (g_reshaped * x_sc / 128.0).reshape(*shape[:-2], shape[-2] // a, shape[-1] // b, a, b)
+    g_x = g_x.transpose(*dims[:-4], dims[-4], dims[-2], dims[-3], dims[-1])
+    g_x = g_x.reshape(*shape)
+    
+    return g_x, None, None
 
 dequantize_impl.defvjp(dequantize_impl_fwd, dequantize_impl_bwd)
 
