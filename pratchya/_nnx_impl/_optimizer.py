@@ -382,7 +382,8 @@ def scale_by_muon(
     
         def update_leaf(g, m):
             c = b1 * m + (1.0 - b1) * g
-            u = newton_schulz(c, steps=ns_steps)
+            # u = newton_schulz(c, steps=ns_steps)
+            u = c
             scale_factor = jnp.sqrt(max(g.shape))
             update = u * scale_factor
                 
@@ -430,7 +431,6 @@ def miulion_optimizer_v2(
     state = nnx.state(model, nnx.Param)
     state_unwrapped = jax.tree_util.tree_map(unwrap, state, is_leaf=lambda x: isinstance(x, nnx.Variable))
     param_labels = jax.tree_util.tree_map_with_path(label_fn, state_unwrapped)
-    del state, model, state_unwrapped
 
     tx = optax.partition(
         transforms={"lion_path": lion_tx, "muon_path": muon_tx},
