@@ -397,7 +397,6 @@ def scale_by_muon(
 
     return base.GradientTransformation(init_fn, update_fn)
 
-
 def muon(
     learning_rate: base.ScalarOrSchedule,
     b1: jax.typing.ArrayLike = 0.9,

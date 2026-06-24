@@ -1,90 +1,91 @@
 
 
-from pratchya._nnx_impl._optimizer import miulion_optimizer, MiulionHyperParams, MiulionScheduler
 from pratchya.preset import PratchyaDummyConfig, Pratchya500M
-from pratchya._nnx_impl._model import NQPratchyaCausalLM, PratchyaCausalLM
+from pratchya._nnx_impl._model import NQPratchyaCausalLM
 
 import jax, jax.numpy as jnp
 from flax import nnx
 import optax
 
-hyperparams = MiulionHyperParams(
-    lion_lr=1e-3,  
-    muon_lr=1e-2,
-    total_steps=1000
-)
-
-cosine_muon = optax.warmup_cosine_decay_schedule(
-    init_value=0.0,
-    peak_value=hyperparams.muon_lr,
-    warmup_steps=0,
-    decay_steps=hyperparams.total_steps,
-    end_value=0.0
-)
-
-cosine_lion = optax.warmup_cosine_decay_schedule(
-    init_value=0.0,
-    peak_value=hyperparams.lion_lr,
-    warmup_steps=0,
-    decay_steps=hyperparams.total_steps,
-    end_value=0.0
-)
-
-schedule = MiulionScheduler(
-    muon_schedule=cosine_muon,
-    lion_schedule=cosine_lion,
-    weight_decay=hyperparams.weight_decay
-)
-
-tx = miulion_optimizer(hyperparams, schedule)
-
-model = PratchyaCausalLM(PratchyaDummyConfig)
-param_arrays = nnx.state(model, nnx.Param)
-opt_state = tx.init(param_arrays)
 
 @nnx.jit(donate_argnums=(0, 1))
-def train_step(model: nnx.Module, opt_state, batch):
+def train_step_fn(model: NQPratchyaCausalLM, optimizer: nnx.Optimizer, batch):
     def loss_fn(model):
         output = model(batch['input_ids'], batch['input_ids'])
         return output.loss
         
     loss, grads = nnx.value_and_grad(loss_fn)(model)
+    optimizer.update(model, grads)
     
-    param_arrays = nnx.state(model, nnx.Param)
-    grad_arrays = nnx.state(grads, nnx.Param)
-    
-    updates, new_opt_state = tx.update(grad_arrays, opt_state, param_arrays)
+    return loss
 
-    from pratchya._qualia._qarr import QArrayImpl
+def prepare_for_train(max_steps = 10, learning_rate = 3e-4, warmup_steps = 5):
+    init_lr, max_lr, end_lr = 1e-6, learning_rate, 1e-6
+    if isinstance(learning_rate, tuple):
+        init_lr, max_lr, end_lr = learning_rate
 
-    def add_param(p, u):
-        if isinstance(p, QArrayImpl):
-            if p.get_value().ndim == 3:
-                def add_fn(carry, args):
-                    p_v, p_s8, p_s32, u_v = args
-                    p_layer = QArrayImpl._tree_unflatten((True, p.tgrid), (p_v, p_s8, p_s32))
-                    new_p = p_layer.astype(jnp.bfloat16) + u_v.astype(jnp.bfloat16)
-                    return carry, QArrayImpl(new_p, p.tgrid)._tree_flatten()[0]
-                _, (nv, ns8, ns32) = jax.lax.scan(add_fn, None, (p.get_value(), p._QArrayImpl__sc_fp8, p._QArrayImpl__sc_fp32, u))
-                return QArrayImpl._tree_unflatten((True, p.tgrid), (nv, ns8, ns32))
-            return QArrayImpl(p.astype(jnp.bfloat16) + u.astype(jnp.bfloat16), p.tgrid)
-        return p + u
+    schedule = optax.warmup_cosine_decay_schedule(init_lr, max_lr, warmup_steps, max_steps, end_lr)
+    tx = optax.adamw(schedule, mu_dtype=jnp.bfloat16)
+    model = NQPratchyaCausalLM(PratchyaDummyConfig)
+    optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
 
-    step_num = opt_state.count
+    return model, optimizer, schedule
 
-    new_params = jax.tree_util.tree_map(
-        add_param,
-        param_arrays, updates,
-        is_leaf=lambda x: isinstance(x, QArrayImpl)
-    )
+max_steps = 100
+warmup_steps = 20
+lr = (1e-6, 5e-3, 1e-4)
+logging_steps = 10
 
-    nnx.update(model, new_params)
-    
-    return loss, new_opt_state
+print("=== prepare model and optimizer ===")
+model, optimizer, schedule = prepare_for_train(max_steps, lr, warmup_steps)
 
+print("=== prepare dataset for training ===")
 inp = jnp.arange(10).reshape(1, -1)
 inp = {'input_ids': inp}
 
-for _ in range(10):
-    loss, opt_state = train_step(model, opt_state, inp)
-    print(f"loss: {loss}")
+def display_hyperparam():
+    print("\n=== Display Hyper Parameters ===")
+    print(f"    max_steps:      {max_steps}")
+    if isinstance(lr, tuple):
+        i, j, k = lr
+        print(f"    init_lr:        {i}")
+        print(f"    max_lr:         {j}")
+        print(f"    end_lr:         {k}")
+    else:
+        print(f"    init_lr:        {lr}")
+    
+    print(f"    logging_steps:  {logging_steps}")
+    print(f"    warmup_steps:   {warmup_steps}")
+    print()
+
+
+def train():
+    history = []
+    print(f"=== init training ===")
+    display_hyperparam()
+
+    for i in range(max_steps):
+        loss = train_step_fn(model, optimizer, inp)
+        if (i + 1) % logging_steps == 0 or i == 0:
+            curr_lr = schedule(i + 1)
+            print(f"step {i + 1:<4} loss: {loss:.4f} | lr: {curr_lr:.4f}")
+            history.append((i + 1, loss))
+
+    print("=== training completed ===")
+    return history
+
+
+history = train()
+
+import matplotlib.pyplot as plt
+
+x, y = zip(*history)
+
+filename = "plot.png"
+
+plt.plot(x, y)
+plt.xlabel("step")
+plt.ylabel("loss")
+plt.title("Training Loss")
+plt.savefig(filename)
+print(f"=== Save Training Loss Picture as {filename} ===")
