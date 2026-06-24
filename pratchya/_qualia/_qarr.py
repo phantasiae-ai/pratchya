@@ -36,10 +36,10 @@ class QArrayImpl:
         
         # Prevent OOM during optimizer steps by sequentially quantizing layers
         if value.ndim == 3:
-            def q_fn(x):
-                return quantize_impl(x, self.__tgrid)
-            # jax.lax.map returns a tuple of stacked arrays
-            return jax.lax.map(q_fn, value)
+            def q_fn(carry, x):
+                return carry, quantize_impl(x, self.__tgrid)
+            _, out = jax.lax.scan(q_fn, None, value)
+            return out
             
         return quantize_impl(value, self.__tgrid)
 
@@ -49,10 +49,11 @@ class QArrayImpl:
         
         # Prevent OOM during optimizer steps by sequentially dequantizing layers
         if self.__value.ndim == 3:
-            def dq_fn(args):
+            def dq_fn(carry, args):
                 v, sc8, sc32 = args
-                return dequantize_impl(v, sc8, sc32, dtype=dtype, tgrid=self.__tgrid)
-            return jax.lax.map(dq_fn, (self.__value, self.__sc_fp8, self.__sc_fp32))
+                return carry, dequantize_impl(v, sc8, sc32, dtype=dtype, tgrid=self.__tgrid)
+            _, out = jax.lax.scan(dq_fn, None, (self.__value, self.__sc_fp8, self.__sc_fp32))
+            return out
             
         x = dequantize_impl(self.__value, self.__sc_fp8, self.__sc_fp32, dtype=dtype, tgrid=self.__tgrid)
         return x
@@ -500,7 +501,7 @@ def dequantize_impl_bwd(dtype, tgrid, res, g_out):
     
     g_x = (g_reshaped * x_sc / 128.0).reshape(*shape[:-2], shape[-2] // a, shape[-1] // b, a, b)
     g_x = g_x.transpose(*dims[:-4], dims[-4], dims[-2], dims[-3], dims[-1])
-    g_x = g_x.reshape(*shape)
+    g_x = g_x.reshape(*shape).astype(g_out.dtype)
     
     return g_x, None, None
 
