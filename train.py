@@ -17,7 +17,7 @@ hyperparams = MiulionHyperParams(
 cosine_muon = optax.warmup_cosine_decay_schedule(
     init_value=0.0,
     peak_value=hyperparams.muon_lr,
-    warmup_steps=100,
+    warmup_steps=0,
     decay_steps=hyperparams.total_steps,
     end_value=0.0
 )
@@ -25,7 +25,7 @@ cosine_muon = optax.warmup_cosine_decay_schedule(
 cosine_lion = optax.warmup_cosine_decay_schedule(
     init_value=0.0,
     peak_value=hyperparams.lion_lr,
-    warmup_steps=100,
+    warmup_steps=0,
     decay_steps=hyperparams.total_steps,
     end_value=0.0
 )

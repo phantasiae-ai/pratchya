@@ -17,10 +17,12 @@ def newton_schulz(G, steps=5):
 
     X = G / (jnp.linalg.norm(G, ord='fro') + 1e-7)
 
-    for _ in range(steps):
-        A = X @ X.T
-        B = A @ X
-        X = 1.5 * X - 0.5 * B
+    def loop_body(i, X_val):
+        A = X_val @ X_val.T
+        B = A @ X_val
+        return 1.5 * X_val - 0.5 * B
+
+    X = jax.lax.fori_loop(0, steps, loop_body, X)
     
     if transpose:
         X = X.T

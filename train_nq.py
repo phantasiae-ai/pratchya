@@ -2,13 +2,43 @@
 
 from pratchya.preset import PratchyaDummyConfig, Pratchya500M
 from pratchya._nnx_impl._model import NQPratchyaCausalLM, PratchyaCausalLM
+from pratchya._nnx_impl._optimizer import miulion_optimizer_nq, MiulionHyperParams, MiulionScheduler
 
 import jax, jax.numpy as jnp
 from flax import nnx
 import optax
 
-model = NQPratchyaCausalLM(PratchyaDummyConfig, rngs=nnx.Rngs(0))
-tx = optax.adamw(1e-3, mu_dtype=jnp.bfloat16)
+
+hyperparams = MiulionHyperParams(
+    lion_lr=4e-3,  
+    muon_lr=5e-2,
+)
+
+cosine_muon = optax.warmup_cosine_decay_schedule(
+    init_value=0.0,
+    peak_value=hyperparams.muon_lr,
+    warmup_steps=100,
+    decay_steps=hyperparams.total_steps,
+    end_value=0.0
+)
+
+cosine_lion = optax.warmup_cosine_decay_schedule(
+    init_value=0.0,
+    peak_value=hyperparams.lion_lr,
+    warmup_steps=100,
+    decay_steps=hyperparams.total_steps,
+    end_value=0.0
+)
+
+schedule = MiulionScheduler(
+    muon_schedule=cosine_muon,
+    lion_schedule=cosine_lion,
+    weight_decay=hyperparams.weight_decay
+)
+
+tx = miulion_optimizer_nq(hyperparams, schedule)
+
+model = NQPratchyaCausalLM(PratchyaDummyConfig)
 optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
 
 @nnx.jit(donate_argnums=(0, 1))

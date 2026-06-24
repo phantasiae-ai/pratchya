@@ -57,6 +57,9 @@ class QArrayImpl:
             
         x = dequantize_impl(self.__value, self.__sc_fp8, self.__sc_fp32, dtype=dtype, tgrid=self.__tgrid)
         return x
+
+    def __jax_array__(self):
+        return self.dequantize(jnp.float32)
     
     @property
     def shape(self):
@@ -94,6 +97,8 @@ class QArrayImpl:
         return QArrayImpl(other, tgrid=(grid_a, grid_b))
 
     def __matmul__(self, other):
+        if hasattr(other, 'value'):
+            other = other.value
         if isinstance(other, QArrayImpl):
             other = self._promote(other, 1)
             x_out = matmul_impl(self.__value, self.__sc_fp8, self.__sc_fp32, other.__value, other.__sc_fp8, other.__sc_fp32, self.__tgrid, other.__tgrid)
@@ -103,6 +108,8 @@ class QArrayImpl:
             return x_out
     
     def __rmatmul__(self, other):
+        if hasattr(other, 'value'):
+            other = other.value
         if isinstance(other, QArrayImpl):
             other = self._promote(other, 0)
             x_out = matmul_impl(other.__value, other.__sc_fp8, other.__sc_fp32, self.__value, self.__sc_fp8, self.__sc_fp32, other.__tgrid, self.__tgrid)
@@ -112,118 +119,146 @@ class QArrayImpl:
             return x_out
 
     def __add__(self, other):
+        if hasattr(other, 'value'):
+            other = other.value
         if isinstance(other, QArrayImpl):
             other = self._promote(other)
             if self.__tgrid != other.tgrid:
                 return QArrayImpl(self.astype(jnp.float32) + other.astype(jnp.float32), self.__tgrid)
             x_out = add_impl(self.__value, self.__sc_fp8, self.__sc_fp32, other.__value, other.__sc_fp8, other.__sc_fp32, self.__tgrid)
             return QArrayImpl(x_out, self.__tgrid)
-        return self.astype(other.dtype) + other
+        return self.astype(getattr(other, 'dtype', jnp.float32)) + other
 
     def __radd__(self, other):
+        if hasattr(other, 'value'):
+            other = other.value
         return self.__add__(other)
 
     def __sub__(self, other):
+        if hasattr(other, 'value'):
+            other = other.value
         if isinstance(other, QArrayImpl):
             other = self._promote(other)
             if self.__tgrid != other.tgrid:
                 return QArrayImpl(self.astype(jnp.float32) - other.astype(jnp.float32), self.__tgrid)
             x_out = sub_impl(self.__value, self.__sc_fp8, self.__sc_fp32, other.__value, other.__sc_fp8, other.__sc_fp32, self.__tgrid)
             return QArrayImpl(x_out, self.__tgrid)
-        return self.astype(other.dtype) - other
+        return self.astype(getattr(other, 'dtype', jnp.float32)) - other
 
     def __rsub__(self, other):
+        if hasattr(other, 'value'):
+            other = other.value
         if isinstance(other, QArrayImpl):
             other = self._promote(other)
             if self.__tgrid != other.tgrid:
                 return QArrayImpl(other.astype(jnp.float32) - self.astype(jnp.float32), self.__tgrid)
             x_out = sub_impl(other.__value, other.__sc_fp8, other.__sc_fp32, self.__value, self.__sc_fp8, self.__sc_fp32, self.__tgrid)
             return QArrayImpl(x_out, self.__tgrid)
-        return other - self.astype(other.dtype)
+        return other - self.astype(getattr(other, 'dtype', jnp.float32))
 
     def __mul__(self, other):
+        if hasattr(other, 'value'):
+            other = other.value
         if isinstance(other, QArrayImpl):
             other = self._promote(other)
             if self.__tgrid != other.tgrid:
                 return QArrayImpl(self.astype(jnp.float32) * other.astype(jnp.float32), self.__tgrid)
             x_out = mul_impl(self.__value, self.__sc_fp8, self.__sc_fp32, other.__value, other.__sc_fp8, other.__sc_fp32, self.__tgrid)
             return QArrayImpl(x_out, self.__tgrid)
-        return self.astype(other.dtype) * other
+        return self.astype(getattr(other, 'dtype', jnp.float32)) * other
 
     def __rmul__(self, other):
+        if hasattr(other, 'value'):
+            other = other.value
         return self.__mul__(other)
 
     def __truediv__(self, other):
+        if hasattr(other, 'value'):
+            other = other.value
         if isinstance(other, QArrayImpl):
             other = self._promote(other)
             if self.__tgrid != other.tgrid:
                 return QArrayImpl(self.astype(jnp.float32) / other.astype(jnp.float32), self.__tgrid)
             x_out = truediv_impl(self.__value, self.__sc_fp8, self.__sc_fp32, other.__value, other.__sc_fp8, other.__sc_fp32, self.__tgrid)
             return QArrayImpl(x_out, self.__tgrid)
-        return self.astype(other.dtype) / other
+        return self.astype(getattr(other, 'dtype', jnp.float32)) / other
 
     def __rtruediv__(self, other):
+        if hasattr(other, 'value'):
+            other = other.value
         if isinstance(other, QArrayImpl):
             other = self._promote(other)
             if self.__tgrid != other.tgrid:
                 return QArrayImpl(other.astype(jnp.float32) / self.astype(jnp.float32), self.__tgrid)
             x_out = truediv_impl(other.__value, other.__sc_fp8, other.__sc_fp32, self.__value, self.__sc_fp8, self.__sc_fp32, self.__tgrid)
             return QArrayImpl(x_out, self.__tgrid)
-        return other / self.astype(other.dtype)
+        return other / self.astype(getattr(other, 'dtype', jnp.float32))
 
     def __floordiv__(self, other):
+        if hasattr(other, 'value'):
+            other = other.value
         if isinstance(other, QArrayImpl):
             other = self._promote(other)
             if self.__tgrid != other.tgrid:
                 return QArrayImpl(self.astype(jnp.float32) // other.astype(jnp.float32), self.__tgrid)
             x_out = floordiv_impl(self.__value, self.__sc_fp8, self.__sc_fp32, other.__value, other.__sc_fp8, other.__sc_fp32, self.__tgrid)
             return QArrayImpl(x_out, self.__tgrid)
-        return self.astype(other.dtype) // other
+        return self.astype(getattr(other, 'dtype', jnp.float32)) // other
 
     def __rfloordiv__(self, other):
+        if hasattr(other, 'value'):
+            other = other.value
         if isinstance(other, QArrayImpl):
             other = self._promote(other)
             if self.__tgrid != other.tgrid:
                 return QArrayImpl(other.astype(jnp.float32) // self.astype(jnp.float32), self.__tgrid)
             x_out = floordiv_impl(other.__value, other.__sc_fp8, other.__sc_fp32, self.__value, self.__sc_fp8, self.__sc_fp32, self.__tgrid)
             return QArrayImpl(x_out, self.__tgrid)
-        return other // self.astype(other.dtype)
+        return other // self.astype(getattr(other, 'dtype', jnp.float32))
 
     def __mod__(self, other):
+        if hasattr(other, 'value'):
+            other = other.value
         if isinstance(other, QArrayImpl):
             other = self._promote(other)
             if self.__tgrid != other.tgrid:
                 return QArrayImpl(self.astype(jnp.float32) % other.astype(jnp.float32), self.__tgrid)
             x_out = mod_impl(self.__value, self.__sc_fp8, self.__sc_fp32, other.__value, other.__sc_fp8, other.__sc_fp32, self.__tgrid)
             return QArrayImpl(x_out, self.__tgrid)
-        return self.astype(other.dtype) % other
+        return self.astype(getattr(other, 'dtype', jnp.float32)) % other
 
     def __rmod__(self, other):
+        if hasattr(other, 'value'):
+            other = other.value
         if isinstance(other, QArrayImpl):
             other = self._promote(other)
             if self.__tgrid != other.tgrid:
                 return QArrayImpl(other.astype(jnp.float32) % self.astype(jnp.float32), self.__tgrid)
             x_out = mod_impl(other.__value, other.__sc_fp8, other.__sc_fp32, self.__value, self.__sc_fp8, self.__sc_fp32, self.__tgrid)
             return QArrayImpl(x_out, self.__tgrid)
-        return other % self.astype(other.dtype)
+        return other % self.astype(getattr(other, 'dtype', jnp.float32))
 
     def __pow__(self, other):
+        if hasattr(other, 'value'):
+            other = other.value
         if isinstance(other, QArrayImpl):
             other = self._promote(other)
             if self.__tgrid != other.tgrid:
                 return QArrayImpl(self.astype(jnp.float32) ** other.astype(jnp.float32), self.__tgrid)
             x_out = pow_impl(self.__value, self.__sc_fp8, self.__sc_fp32, other.__value, other.__sc_fp8, other.__sc_fp32, self.__tgrid)
             return QArrayImpl(x_out, self.__tgrid)
-        return self.astype(other.dtype) ** other
+        return self.astype(getattr(other, 'dtype', jnp.float32)) ** other
 
     def __rpow__(self, other):
+        if hasattr(other, 'value'):
+            other = other.value
         if isinstance(other, QArrayImpl):
             other = self._promote(other)
             if self.__tgrid != other.tgrid:
                 return QArrayImpl(other.astype(jnp.float32) ** self.astype(jnp.float32), self.__tgrid)
             x_out = pow_impl(other.__value, other.__sc_fp8, other.__sc_fp32, self.__value, self.__sc_fp8, self.__sc_fp32, self.__tgrid)
             return QArrayImpl(x_out, self.__tgrid)
-        return other ** self.astype(other.dtype)
+        return other ** self.astype(getattr(other, 'dtype', jnp.float32))
 
     def __getitem__(self, idx):
         # Fast path for unquantized arrays (like the output of qx.silu)
