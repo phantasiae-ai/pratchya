@@ -8,7 +8,6 @@ from jax.typing import ArrayLike, DTypeLike
 
 from .._qualia import QArrayImpl
 
-@nnx.jit(donate_argnums=(0,))
 def newton_schulz(G, steps=5):
     m, n = G.shape
     transpose = m > n
@@ -431,6 +430,8 @@ def miulion_optimizer_v2(
     state = nnx.state(model, nnx.Param)
     state_unwrapped = jax.tree_util.tree_map(unwrap, state, is_leaf=lambda x: isinstance(x, nnx.Variable))
     param_labels = jax.tree_util.tree_map_with_path(label_fn, state_unwrapped)
+    del state, model, state_unwrapped
+
     tx = optax.partition(
         transforms={"lion_path": lion_tx, "muon_path": muon_tx},
         param_labels=param_labels
