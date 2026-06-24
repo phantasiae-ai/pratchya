@@ -376,13 +376,14 @@ class NQLinear(nnx.Module):
 
     def __call__(self, x: jax.Array):
         dtype = x.dtype
-        tgrid_w = (self.blksize_in, self.blksize_out)
-        tgrid_x = (1, self.blksize_in)
+        # tgrid_w = (self.blksize_in, self.blksize_out)
+        # tgrid_x = (1, self.blksize_in)
 
-        x_q = QArrayImpl(x, tgrid_x)
-        w_q = QArrayImpl(self.kernel, tgrid_w)
+        # x_q = QArrayImpl(x, tgrid_x)
+        # w_q = QArrayImpl(self.kernel, tgrid_w)
 
-        return (x_q @ w_q).astype(dtype)
+        # return (x_q @ w_q).astype(dtype)
+        return (x @ self.kernel).astype(dtype)
     
 
 class NQParam(nnx.Param):
