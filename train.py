@@ -57,12 +57,20 @@ def train_step(model: nnx.Module, opt_state, batch):
 
     from pratchya._qualia._qarr import QArrayImpl
 
-    step_num = opt_state.count
-
     def add_param(p, u):
         if isinstance(p, QArrayImpl):
+            if p.get_value().ndim == 3:
+                def add_fn(args):
+                    p_v, p_s8, p_s32, u_v = args
+                    p_layer = QArrayImpl._tree_unflatten((True, p.tgrid), (p_v, p_s8, p_s32))
+                    new_p = p_layer.astype(jnp.float32) + u_v
+                    return QArrayImpl(new_p, p.tgrid)._tree_flatten()[0]
+                nv, ns8, ns32 = jax.lax.map(add_fn, (p.get_value(), p._QArrayImpl__sc_fp8, p._QArrayImpl__sc_fp32, u))
+                return QArrayImpl._tree_unflatten((True, p.tgrid), (nv, ns8, ns32))
             return QArrayImpl(p.astype(jnp.float32) + u, p.tgrid)
         return p + u
+
+    step_num = opt_state.count
 
     new_params = jax.tree_util.tree_map(
         add_param,
