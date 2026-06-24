@@ -91,7 +91,6 @@ class LowRankFFN(nnx.Module):
 
 class TimeMix(nnx.Module):
     def __init__(self, config: PratchyaConfig, *, rngs: nnx.Rngs, layer_idx: Optional[int] = None):
-        self.layer_idx = layer_idx
         self.head_dim = config.head_dim
         self.n_head = config.hidden_size // config.head_dim
 
@@ -132,7 +131,7 @@ class TimeMix(nnx.Module):
     ):
         B, T, C, = x.shape
         N, H = self.n_head, self.head_dim
-        layer_idx = self.layer_idx
+        layer_idx = state.layer_idx
 
         tm_state = state.tm_state[layer_idx]
         x_shifted = jnp.concatenate([tm_state, x[:, :-1, :]], axis=1)
@@ -234,18 +233,16 @@ class ChannelMix(nnx.Module):
         self.w_v = Linear(config.intermediate_size, config.hidden_size, tgrid, rngs=rngs, dtype=config.dtype)
         self.mu_x = Param((1, config.hidden_size), (1, config.blksize), rngs=rngs, dtype=config.mu_dtype)
 
-        self.layer_idx = layer_idx   
-
     def __call__(self, x: jax.Array, state: PratchyaState):
         tgrid = self.w_k.kernel.tgrid
-        layer_idx = self.layer_idx
+        layer_idx = state.layer_idx
 
         cm_state = state.cm_state[layer_idx]
         x_shifted = jnp.concatenate([cm_state, x[:, :-1, :]], axis=1)
         cm_state = x[:, -1:, :]
 
-        _x = x
-        _x_shifted = x_shifted
+        _x = x.astype(jnp.float32)
+        _x_shifted = x_shifted.astype(jnp.float32)
 
         x_k = lerp(_x, _x_shifted, self.mu_x.astype(_x.dtype))
         k = self.w_k(x_k).astype(jnp.float32)
@@ -314,8 +311,46 @@ class RWKVBlock(nnx.Module):
         x = self.post_rmsnorm(x)
         dx, state = self.cm(x, state)
         x = x + dx
+
+        state = state.replace(layer_idx=state.layer_idx + 1)
         
         return x, v_0, state
+
+
+
+class RWKVState(nnx.Module):
+    def __init__(self, config: PratchyaConfig, *, rngs: nnx.Rngs):
+        self.w_tm = Linear(config.hidden_size, config.hidden_size, (config.blksize, config.blksize), rngs=rngs, dtype=config.act_dtype)
+        self.w_cm = Linear(config.hidden_size, config.hidden_size, (config.blksize, config.blksize), rngs=rngs, dtype=config.act_dtype)
+        self.w_wkv = nnx.Linear(config.head_dim, config.head_dim * config.head_dim, rngs=rngs, dtype=config.wkv_dtype)
+        self.gate = Linear(config.hidden_size, 1, (config.blksize, 1), rngs=rngs, dtype=config.dtype)
+        
+        self.spl_tm = nnx.Param(jnp.ones((config.n_layers, 1, 1, 1), config.act_dtype))
+        self.spl_cm = nnx.Param(jnp.ones((config.n_layers, 1, 1, 1), config.act_dtype))
+        self.spl_wkv = nnx.Param(jnp.ones((config.n_layers, 1, 1, 1, 1), config.wkv_dtype))
+
+        self.head_dim = config.head_dim
+
+    def __call__(self, x: jax.Array) -> PratchyaState:
+        B, T, C = x.shape
+        H = self.head_dim
+        N = C // H
+
+        score = self.gate(x)
+        weights = jax.nn.softmax(score, axis=-2)
+        gstate = jnp.sum(x * weights, axis=-2, keepdims=True)
+        
+        tm_state_i = self.spl_tm * self.w_tm(gstate)[None, ...]
+        cm_state_i = self.spl_cm * self.w_cm(gstate)[None, ...]
+        wkv_state_i = self.spl_wkv * self.w_wkv(gstate.reshape(B, N, H)).reshape(B, N, H, H)[None, ...]
+
+        return PratchyaState(
+            tm_state=tm_state_i,
+            cm_state=cm_state_i,
+            wkv_state=wkv_state_i,
+            step=0
+        )
+
 
 
 class NQEmbeddingScaled(nnx.Embed):

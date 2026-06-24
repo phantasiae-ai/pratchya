@@ -359,15 +359,15 @@ def quantize_impl(x: ArrayLike, tgrid: Tuple = (128, 128)):
     dims = list(range(x_reshaped.ndim))
     x_reshaped = x_reshaped.transpose(*dims[:-4], dims[-4], dims[-2], dims[-3], dims[-1])
     
-    total_elements = math.prod(shape)
-    M_blocks = total_elements // (a * b)
+    spatial_elements = shape[-2] * shape[-1]
+    M_blocks = spatial_elements // (a * b)
     
     target_K = max(1, (a * b) // 16)
     K = math.gcd(target_K, M_blocks)
     
     M = M_blocks // K
     
-    x_reshaped = x_reshaped.reshape(M, K, a, b)
+    x_reshaped = x_reshaped.reshape(*shape[:-2], M, K, a, b)
     
     m_i_f32 = jnp.max(jnp.abs(x_reshaped), axis=(-2, -1), keepdims=True).astype(jnp.float32)
     M_j_f32 = jnp.max(m_i_f32, axis=(-3, -2, -1), keepdims=True)
@@ -381,17 +381,17 @@ def quantize_impl(x: ArrayLike, tgrid: Tuple = (128, 128)):
     S_1i = jax.lax.bitcast_convert_type((S_1i_u32 >> 23).astype(jnp.uint8), jnp.float8_e8m0fnu)
     
     S_1i_f32_q = jax.lax.bitcast_convert_type(jax.lax.bitcast_convert_type(S_1i, jnp.uint8).astype(jnp.uint32) << 23, jnp.float32)
-    S_eff = (S_1i_f32_q * M_j_f32).reshape(M, K, 1, 1)
+    S_eff = (S_1i_f32_q * M_j_f32).reshape(*shape[:-2], M, K, 1, 1)
     S_eff = jnp.maximum(S_eff, 1e-7)
     
     x_fp8 = (x_reshaped / S_eff * 128.0).astype(jnp.bfloat16).astype(jnp.float8_e4m3fn)
-    sc_fp8 = S_1i.reshape(M, 1, K, 1)
-    sc_fp32 = M_j_f32.reshape(M, 1, 1, 1)
+    sc_fp8 = S_1i.reshape(*shape[:-2], M, 1, K, 1)
+    sc_fp32 = M_j_f32.reshape(*shape[:-2], M, 1, 1, 1)
 
     x_fp8 = x_fp8.reshape(*shape[:-2], shape[-2] // a, shape[-1] // b, a, b)
     x_fp8 = x_fp8.transpose(*dims[:-4], dims[-4], dims[-2], dims[-3], dims[-1])
 
-    return x_fp8.reshape(*orig_shape), sc_fp8.reshape(M, K), sc_fp32.reshape(M, 1, 1)
+    return x_fp8.reshape(*orig_shape), sc_fp8.reshape(*shape[:-2], M, K), sc_fp32.reshape(*shape[:-2], M, 1, 1)
 
 quantize_impl = jax.custom_vjp(quantize_impl, nondiff_argnums=(1,))
 
@@ -436,8 +436,6 @@ def dequantize_impl(x_fp8: ArrayLike, sc_fp8: ArrayLike, sc_fp32: ArrayLike, dty
         
     shape = x_fp8.shape
     M, K = sc_fp8.shape[-2:]
-    batch_size = math.prod(sc_fp8.shape[:-2]) if sc_fp8.ndim > 2 else 1
-    M_total = batch_size * M
     a, b = tgrid
     
     # Valid spatial memory layout
@@ -445,9 +443,9 @@ def dequantize_impl(x_fp8: ArrayLike, sc_fp8: ArrayLike, sc_fp32: ArrayLike, dty
     dims = list(range(x_reshaped.ndim))
     x_reshaped = x_reshaped.transpose(*dims[:-4], dims[-4], dims[-2], dims[-3], dims[-1])
     
-    x_reshaped = x_reshaped.reshape(M_total, K, a, b)
-    sc_fp8_reshaped = sc_fp8.reshape(M_total, K, 1, 1)
-    sc_fp32_reshaped = sc_fp32.reshape(M_total, 1, 1, 1)
+    x_reshaped = x_reshaped.reshape(*shape[:-2], M, K, a, b)
+    sc_fp8_reshaped = sc_fp8.reshape(*shape[:-2], M, K, 1, 1)
+    sc_fp32_reshaped = sc_fp32.reshape(*shape[:-2], M, 1, 1, 1)
     
     sc_fp8_f32 = jax.lax.bitcast_convert_type(jax.lax.bitcast_convert_type(sc_fp8_reshaped, jnp.uint8).astype(jnp.uint32) << 23, jnp.float32)
     x_sc = sc_fp8_f32 * sc_fp32_reshaped

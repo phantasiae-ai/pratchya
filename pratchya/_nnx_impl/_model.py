@@ -3,7 +3,7 @@ import jax, jax.numpy as jnp
 from typing import Optional
 
 from .._config import PratchyaConfig, PratchyaState, PratchyaOutput, init_state
-from ._module import EmbeddingScaled, RWKVBlock, RMSNorm, Linear, NQEmbeddingScaled, NQRWKVBlock, NQRMSNorm, NQLinear, NQRWKVState
+from ._module import EmbeddingScaled, RWKVBlock, RMSNorm, Linear, NQEmbeddingScaled, NQRWKVBlock, NQRMSNorm, NQLinear, NQRWKVState, RWKVState
 from ._utils import compute_loss
 
 
@@ -18,7 +18,13 @@ class PratchyaModel(nnx.Module):
             dtype=config.language_dtype
         )
 
-        self.blocks = nnx.List([RWKVBlock(config, rngs=rngs, layer_idx=i) for i in range(config.n_layers)])
+        self.init_block = RWKVBlock(config, rngs=rngs, layer_idx=0)
+        @nnx.split_rngs(splits=config.n_layers - 1)
+        @nnx.vmap(in_axes=(0,), out_axes=0)
+        def vmap_block(rngs: nnx.Rngs):
+            return RWKVBlock(config, rngs=rngs)
+        
+        self.blocks = vmap_block(rngs)
 
         self.pre_rmsnorm = RMSNorm(
             config.hidden_size, (1, config.blksize),
@@ -28,6 +34,8 @@ class PratchyaModel(nnx.Module):
             config.hidden_size, (1, config.blksize),
             epsilon=config.rmsnorm_epsilon,
         )
+
+        self.init_state = RWKVState(config, rngs=rngs)
 
         self.config = config
 
@@ -43,9 +51,15 @@ class PratchyaModel(nnx.Module):
         x = self.embed_tokens(input_ids)
         x = self.pre_rmsnorm(x)
 
-        v = jnp.zeros_like(x, jnp.float32)
-        for i, layer in enumerate(self.blocks):
+        x, v, state = self.init_block(x, None, t_positions, state)
+        
+        @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=nnx.Carry)
+        def scan_block(carry, layer):
+            x, v, state = carry
             x, v, state = layer(x, v, t_positions, state)
+            return (x, v, state)
+        
+        x, _, state = scan_block((x, v, state), self.blocks)
 
         x = self.final_rmsnorm(x)
 

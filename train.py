@@ -9,8 +9,8 @@ from flax import nnx
 import optax
 
 hyperparams = MiulionHyperParams(
-    lion_lr=1e-4,  # Safer LR for 500M
-    muon_lr=1e-3,  # Safer LR for 500M
+    lion_lr=1e-3,  
+    muon_lr=1e-2,
     total_steps=1000
 )
 
@@ -38,7 +38,7 @@ schedule = MiulionScheduler(
 
 tx = miulion_optimizer(hyperparams, schedule)
 
-model = NQPratchyaCausalLM(PratchyaDummyConfig, rngs=nnx.Rngs(0))
+model = PratchyaCausalLM(PratchyaDummyConfig)
 param_arrays = nnx.state(model, nnx.Param)
 opt_state = tx.init(param_arrays)
 
