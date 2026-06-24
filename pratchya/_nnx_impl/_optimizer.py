@@ -8,7 +8,7 @@ from jax.typing import ArrayLike, DTypeLike
 
 from .._qualia import QArrayImpl
 
-
+@nnx.jit(donate_argnums=(0,))
 def newton_schulz(G, steps=5):
     m, n = G.shape
     transpose = m > n
