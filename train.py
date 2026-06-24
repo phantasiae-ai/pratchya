@@ -42,7 +42,7 @@ model = PratchyaCausalLM(PratchyaDummyConfig)
 param_arrays = nnx.state(model, nnx.Param)
 opt_state = tx.init(param_arrays)
 
-@nnx.jit
+@nnx.jit(donate_argnums=(0, 1))
 def train_step(model: nnx.Module, opt_state, batch):
     def loss_fn(model):
         output = model(batch['input_ids'], batch['input_ids'])

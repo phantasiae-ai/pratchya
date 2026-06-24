@@ -116,20 +116,26 @@ def miulion_optimizer(hyperparams: MiulionHyperParams, scheduler: MiulionSchedul
 
             orig_shape = g.shape
             orig_size = g.size
-            flat_g = g.ravel()
 
-            pad_size = m.size - orig_size
-            padded_flat_g = jnp.pad(flat_g, (0, pad_size)) if pad_size > 0 else flat_g
-            g_blocked = padded_flat_g.reshape(m.shape)
+            if m.shape == orig_shape:
+                g_blocked = g
+                c_blocked = beta1 * m + (1.0 - beta1) * g_blocked
+                new_m_blocked = beta2 * m + (1.0 - beta2) * g_blocked
+                c = c_blocked
+            else:
+                flat_g = g.ravel()
+                pad_size = m.size - orig_size
+                padded_flat_g = jnp.pad(flat_g, (0, pad_size)) if pad_size > 0 else flat_g
+                g_blocked = padded_flat_g.reshape(m.shape)
 
-            c_blocked = beta1 * m + (1.0 - beta1) * g_blocked
-            new_m_blocked = beta2 * m + (1.0 - beta2) * g_blocked
+                c_blocked = beta1 * m + (1.0 - beta1) * g_blocked
+                new_m_blocked = beta2 * m + (1.0 - beta2) * g_blocked
+
+                c = c_blocked.ravel()[:orig_size].reshape(orig_shape)
 
             new_m = new_m_blocked
             if isinstance(param, QArrayImpl):
                 new_m = QArrayImpl(new_m_blocked, tgrid)
-
-            c = c_blocked.ravel()[:orig_size].reshape(orig_shape)
 
             if should_use_muon(path, g):
                 u = newton_schulz(c, steps=ns_steps)

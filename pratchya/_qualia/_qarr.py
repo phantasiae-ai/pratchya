@@ -31,13 +31,29 @@ class QArrayImpl:
     def get_value(self):
         return self.__value
 
-    def __quantize(self, x: jax.Array):
-        x, sc_fp8, sc_fp32 = quantize_impl(x, self.__tgrid)
-        return x, sc_fp8, sc_fp32
+    def __quantize(self, value):
+        from ._qarr import quantize_impl
+        
+        # Prevent OOM during optimizer steps by sequentially quantizing layers
+        if value.ndim == 3:
+            def q_fn(x):
+                return quantize_impl(x, self.__tgrid)
+            # jax.lax.map returns a tuple of stacked arrays
+            return jax.lax.map(q_fn, value)
+            
+        return quantize_impl(value, self.__tgrid)
 
     def dequantize(self, dtype):
         if self.__value.dtype != jnp.float8_e4m3fn:
             return self.__value.astype(dtype)
+        
+        # Prevent OOM during optimizer steps by sequentially dequantizing layers
+        if self.__value.ndim == 3:
+            def dq_fn(args):
+                v, sc8, sc32 = args
+                return dequantize_impl(v, sc8, sc32, dtype=dtype, tgrid=self.__tgrid)
+            return jax.lax.map(dq_fn, (self.__value, self.__sc_fp8, self.__sc_fp32))
+            
         x = dequantize_impl(self.__value, self.__sc_fp8, self.__sc_fp32, dtype=dtype, tgrid=self.__tgrid)
         return x
     
