@@ -193,13 +193,15 @@ class NQPratchyaCausalLM(nnx.Module):
             logits = jnp.empty((0,)) # Discard logits to save memory
             
             # Reset layer_idx for safety
-            state = state.replace(layer_idx=0)
+            if state is not None:
+                state = state.replace(layer_idx=0)
             
         else:
             x, state = self.model(input_ids, state)
             logits = nnx.remat(self.lm_head)(x)
             loss = None
-            state = state.replace(layer_idx=0)
+            if state is not None:
+                state = state.replace(layer_idx=0)
 
         return PratchyaOutput(
             logits=logits,
