@@ -175,12 +175,12 @@ class NQPratchyaCausalLM(nnx.Module):
         logits = None
         if label is not None:
             loss = jnp.array(0., dtype=jnp.bfloat16)
-            B = x.shape[0]
-            for i in range(B):
-                logit_i = self.lm_head(x[i:i+1, :, :])
-                loss = loss + compute_loss(logit_i[:, :-1, :], label[:, 1:])
+            # B = x.shape[0]
+            # for i in range(B):
+            #     logit_i = self.lm_head(x[i:i+1, :, :])
+            #     loss = loss + compute_loss(logit_i[:, :-1, :], label[:, 1:])
 
-            loss = loss / B
+            # loss = loss / B
         
         else:
             logits = self.lm_head(x)
