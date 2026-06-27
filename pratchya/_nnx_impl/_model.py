@@ -48,20 +48,20 @@ class PratchyaModel(nnx.Module):
 
         t_positions = state.step + jnp.arange(T, dtype=jnp.int32)
 
-        x = self.embed_tokens(input_ids)
-        x = self.pre_rmsnorm(x)
+        x = nnx.remat(self.embed_tokens)(input_ids)
+        x = nnx.remat(self.pre_rmsnorm)(x)
 
-        x, v, state = self.init_block(x, None, t_positions, state)
+        x, v, state = nnx.remat(self.init_block)(x, None, t_positions, state)
         
         @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=nnx.Carry)
         def scan_block(carry, layer):
             x, v, state = carry
-            x, v, state = layer(x, v, t_positions, state)
+            x, v, state = nnx.remat(layer)(x, v, t_positions, state)
             return (x, v, state)
         
         x, _, state = scan_block((x, v, state), self.blocks)
 
-        x = self.final_rmsnorm(x)
+        x = nnx.remat(self.final_rmsnorm)(x)
 
         state = state.replace(step=state.step + T)
 
@@ -83,7 +83,7 @@ class PratchyaCausalLM(nnx.Module):
     ):
         
         x, state = self.model(input_ids, state)
-        logits = self.lm_head(x)
+        logits = nnx.remat(self.lm_head)(x)
 
         loss = jnp.array(0.0)
         if label is not None:
@@ -130,26 +130,26 @@ class NQPratchyaModel(nnx.Module):
 
         B, T = input_ids.shape
 
-        x = self.embed_tokens(input_ids)
+        x = nnx.remat(self.embed_tokens)(input_ids)
 
         if state is None:
             state = self.init_state(x)
 
         t_positions = state.step + jnp.arange(T, dtype=jnp.int32)
 
-        x = self.pre_rmsnorm(x)
+        x = nnx.remat(self.pre_rmsnorm)(x)
 
-        x, v, state = self.init_block(x, None, t_positions, state)
+        x, v, state = nnx.remat(self.init_block)(x, None, t_positions, state)
         
         @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=nnx.Carry)
         def scan_block(carry, layer):
             x, v, state = carry
-            x, v, state = layer(x, v, t_positions, state)
+            x, v, state = nnx.remat(layer)(x, v, t_positions, state)
             return (x, v, state)
         
         x, _, state = scan_block((x, v, state), self.blocks)
 
-        x = self.final_rmsnorm(x)
+        x = nnx.remat(self.final_rmsnorm)(x)
 
         state = state.replace(step=state.step + T)
 
@@ -171,7 +171,7 @@ class NQPratchyaCausalLM(nnx.Module):
     ):
         
         x, state = self.model(input_ids, state)
-        logits = self.lm_head(x)
+        logits = nnx.remat(self.lm_head)(x)
 
         loss = None
         if label is not None:

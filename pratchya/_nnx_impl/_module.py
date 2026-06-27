@@ -612,9 +612,9 @@ class NQRWKVState(nnx.Module):
         self.w_wkv = NQLinear(config.head_dim, config.head_dim * config.head_dim, rngs=rngs, dtype=config.wkv_dtype)
         self.gate = NQLinear(config.hidden_size, 1, rngs=rngs, dtype=config.dtype)
         
-        self.spl_tm = nnx.Param(jnp.ones((config.n_layers, 1, 1, 1), config.act_dtype))
-        self.spl_cm = nnx.Param(jnp.ones((config.n_layers, 1, 1, 1), config.act_dtype))
-        self.spl_wkv = nnx.Param(jnp.ones((config.n_layers, 1, 1, 1, 1), config.wkv_dtype))
+        self.spl_tm = nnx.Param(jnp.ones((config.n_layers), config.act_dtype))
+        self.spl_cm = nnx.Param(jnp.ones((config.n_layers), config.act_dtype))
+        self.spl_wkv = nnx.Param(jnp.ones((config.n_layers), config.wkv_dtype))
 
         self.head_dim = config.head_dim
 
@@ -627,9 +627,9 @@ class NQRWKVState(nnx.Module):
         weights = jax.nn.softmax(score, axis=-2)
         gstate = jnp.sum(x * weights, axis=-2, keepdims=True)
         
-        tm_state_i = self.spl_tm * self.w_tm(gstate)[None, ...]
-        cm_state_i = self.spl_cm * self.w_cm(gstate)[None, ...]
-        wkv_state_i = self.spl_wkv * self.w_wkv(gstate.reshape(B, N, H)).reshape(B, N, H, H)[None, ...]
+        tm_state_i = self.spl_tm[:, None, None, None] * self.w_tm(gstate)[None, ...]
+        cm_state_i = self.spl_cm[:, None, None, None] * self.w_cm(gstate)[None, ...]
+        wkv_state_i = self.spl_wkv[:, None, None, None, None] * self.w_wkv(gstate.reshape(B, N, H)).reshape(B, N, H, H)[None, ...]
 
         return PratchyaState(
             tm_state=tm_state_i,
