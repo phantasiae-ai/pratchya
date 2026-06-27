@@ -144,6 +144,7 @@ class NQPratchyaModel(nnx.Module):
         x, v, state = nnx.remat(self.init_block)(x, None, t_positions, state)
         
         @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=nnx.Carry)
+        @nnx.remat
         def scan_block(carry, layer):
             x, v, state = carry
             x, v, state = layer(x, v, t_positions, state)
