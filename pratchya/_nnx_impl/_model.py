@@ -166,24 +166,29 @@ class NQPratchyaCausalLM(nnx.Module):
     def __call__(
         self, input_ids: jax.Array, 
         label: Optional[jax.Array] = None,
-        *, state: Optional[PratchyaState] = None
+        *, state: Optional[PratchyaState] = None,
+        logits_sharding = None
     ):
-        
         x, state = self.model(input_ids, state)
+        
+        # We constrain the kernel to be fully replicated to force XLA to AllGather it
+        kernel = self.lm_head.kernel.value
+        kernel = jax.lax.with_sharding_constraint(kernel, jax.sharding.PartitionSpec())
+        
+        logits = (x @ kernel).astype(x.dtype)
+
+        # CRITICAL MEMORY FIX: Force logits to be sharded on the batch dimension!
+        # Because the inner model might accidentally replicate x, we MUST guarantee that 
+        # logits is sharded by batch before it hits Softmax, otherwise Softmax spawns 43GB temporaries.
+        # PartitionSpec('fsdp', None, None) maps directly to the global mesh defined in train.py!
+        logits = jax.lax.with_sharding_constraint(
+            logits, 
+            jax.sharding.PartitionSpec('fsdp', None, None)
+        )
 
         loss = None
-        logits = None
         if label is not None:
-            loss = jnp.array(0., dtype=jnp.bfloat16)
-            # B = x.shape[0]
-            # for i in range(B):
-            #     logit_i = self.lm_head(x[i:i+1, :, :])
-            #     loss = loss + compute_loss(logit_i[:, :-1, :], label[:, 1:])
-
-            # loss = loss / B
-        
-        else:
-            logits = self.lm_head(x)
+            loss = compute_loss(logits[:, :-1, :], label[:, 1:])
 
         state = state.replace(layer_idx=0)
 
