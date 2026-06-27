@@ -106,11 +106,11 @@ class NQPratchyaModel(nnx.Module):
             rngs=rngs, dtype=config.language_dtype
         )
 
-        self.init_block = RWKVBlock(config, rngs=rngs, layer_idx=0)
+        self.init_block = NQRWKVBlock(config, rngs=rngs, layer_idx=0)
         @nnx.split_rngs(splits=config.n_layers - 1)
         @nnx.vmap(in_axes=(0,), out_axes=0)
         def vmap_block(rngs: nnx.Rngs):
-            return RWKVBlock(config, rngs=rngs)
+            return NQRWKVBlock(config, rngs=rngs)
         
         self.blocks = vmap_block(rngs)
 
