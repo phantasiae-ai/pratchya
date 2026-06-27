@@ -108,11 +108,14 @@ class NQPratchyaModel(nnx.Module):
 
         self.init_block = NQRWKVBlock(config, rngs=rngs, layer_idx=0)
         
-        # CRITICAL MEMORY FIX: Do NOT use nnx.vmap!
-        # vmap stacks all parameters into a single massive 14GB array. 
-        # XLA's partitioner tries to hoist the AllGather of this array, causing a 54GB OOM!
-        # Using a list of independent blocks forces XLA to AllGather layer-by-layer (450MB peak)!
-        self.blocks = nnx.List([NQRWKVBlock(config, rngs=rngs) for _ in range(config.n_layers - 1)])
+        # CRITICAL MEMORY FIX: 
+        # Stack all parameters using nnx.vmap! We MUST stack them so we can use nnx.scan!
+        self.blocks = nnx.vmap(
+            NQRWKVBlock, 
+            in_axes=(None,), 
+            out_axes=0,
+            axis_size=config.n_layers - 1
+        )(config, rngs=rngs)
 
         self.pre_rmsnorm = NQRMSNorm(
             config.hidden_size,
@@ -143,10 +146,23 @@ class NQPratchyaModel(nnx.Module):
         state = state.replace(layer_idx=0)
         x, v, state = nnx.remat(self.init_block)(x, None, t_positions, state)
         
-        # Unroll the loop to enforce layer-by-layer rematerialization
-        for i, block in enumerate(self.blocks):
-            state = state.replace(layer_idx=i + 1)
+        # CRITICAL MEMORY FIX: Force sequential FSDP AllGathers!
+        # A Python for-loop causes XLA to aggressively hoist the 33MB AllGathers for all 31 layers 
+        # to the very beginning of the graph (causing the 51GB OOM). 
+        # nnx.scan acts as an absolute compiler barrier, forcing XLA to AllGather and garbage 
+        # collect the FSDP weights one layer at a time sequentially!
+        layer_indices = jnp.arange(1, self.config.n_layers)
+        
+        @nnx.scan(
+            in_axes=(nnx.Carry, nnx.Carry, None, nnx.Carry, 0, 0),
+            out_axes=(nnx.Carry, nnx.Carry, nnx.Carry, None)
+        )
+        def scan_blocks(x, v, t_positions, state, block, idx):
+            state = state.replace(layer_idx=idx)
             x, v, state = nnx.remat(block)(x, v, t_positions, state)
+            return x, v, state, None
+            
+        x, v, state, _ = scan_blocks(x, v, t_positions, state, self.blocks, layer_indices)
 
         x = nnx.remat(self.final_rmsnorm)(x)
 
