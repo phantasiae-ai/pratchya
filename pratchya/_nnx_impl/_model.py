@@ -112,7 +112,7 @@ class NQPratchyaModel(nnx.Module):
         # vmap stacks all parameters into a single massive 14GB array. 
         # XLA's partitioner tries to hoist the AllGather of this array, causing a 54GB OOM!
         # Using a list of independent blocks forces XLA to AllGather layer-by-layer (450MB peak)!
-        self.blocks = [NQRWKVBlock(config, rngs=rngs) for _ in range(config.n_layers - 1)]
+        self.blocks = nnx.List([NQRWKVBlock(config, rngs=rngs) for _ in range(config.n_layers - 1)])
 
         self.pre_rmsnorm = NQRMSNorm(
             config.hidden_size,
