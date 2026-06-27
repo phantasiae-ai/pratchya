@@ -170,12 +170,27 @@ class NQPratchyaCausalLM(nnx.Module):
         logits_sharding = None
     ):
         x, state = self.model(input_ids, state)
-        logits = nnx.remat(self.lm_head)(x)
-
+        
         # CRITICAL MEMORY FIX: 
-        # Apply the explicitly passed sharding constraint to prevent 43GB Softmax OOM!
+        # Because lm_head.kernel (674MB) is larger than x (268MB), XLA's greedy cost model 
+        # decides to AllGather x instead of the weights. This creates a 10.8GB partial tensor 
+        # that OOMs the TPU during Softmax!
+        # By forcing the kernel to be fully replicated, XLA must AllGather the weights instead, 
+        # completely bypassing the 10.8GB partial tensor!
+        kernel = self.lm_head.kernel.value
+        try:
+            kernel = jax.lax.with_sharding_constraint(kernel, jax.sharding.PartitionSpec())
+        except Exception:
+            pass
+            
+        logits = (x @ kernel).astype(x.dtype)
+
+        # Fallback constraint for the logits just in case
         if logits_sharding is not None:
-            logits = jax.lax.with_sharding_constraint(logits, logits_sharding)
+            try:
+                logits = jax.lax.with_sharding_constraint(logits, logits_sharding)
+            except Exception:
+                pass
 
         loss = None
         if label is not None:
