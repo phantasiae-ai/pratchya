@@ -171,20 +171,18 @@ class NQPratchyaCausalLM(nnx.Module):
     ):
         x, state = self.model(input_ids, state)
         
-        # We constrain the kernel to be fully replicated to force XLA to AllGather it
         kernel = self.lm_head.kernel.value
-        kernel = jax.lax.with_sharding_constraint(kernel, jax.sharding.PartitionSpec())
+        if logits_sharding is not None:
+            # Extract the mesh from the explicitly passed sharding object
+            # This completely bypasses the "requires a non-empty mesh in context" error!
+            mesh = logits_sharding.mesh
+            kernel = jax.lax.with_sharding_constraint(kernel, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()))
         
         logits = (x @ kernel).astype(x.dtype)
 
-        # CRITICAL MEMORY FIX: Force logits to be sharded on the batch dimension!
-        # Because the inner model might accidentally replicate x, we MUST guarantee that 
-        # logits is sharded by batch before it hits Softmax, otherwise Softmax spawns 43GB temporaries.
-        # PartitionSpec('fsdp', None, None) maps directly to the global mesh defined in train.py!
-        logits = jax.lax.with_sharding_constraint(
-            logits, 
-            jax.sharding.PartitionSpec('fsdp', None, None)
-        )
+        if logits_sharding is not None:
+            # logits_sharding is already a concrete NamedSharding(mesh, P('fsdp')) passed from train.py!
+            logits = jax.lax.with_sharding_constraint(logits, logits_sharding)
 
         loss = None
         if label is not None:
