@@ -168,40 +168,26 @@ class NQPratchyaCausalLM(nnx.Module):
         label: Optional[jax.Array] = None,
         *, state: Optional[PratchyaState] = None
     ):
-        
+        x, state = self.model(input_ids, state)
+        logits = nnx.remat(self.lm_head)(x)
+
+        # CRITICAL MEMORY FIX: 
+        # The lm_head matmul creates a 10.8GB logits tensor. By default, XLA AllReduces this 
+        # into a FULLY REPLICATED tensor on every TPU. When it runs Softmax for the loss, 
+        # it generates 43GB of replicated temporaries and instantly OOMs!
+        # By constraining logits to match the batch sharding of input_ids, XLA uses ReduceScatter 
+        # instead, shrinking the temporaries to a tiny 1.3GB per device!
+        try:
+            logits = jax.lax.with_sharding_constraint(logits, input_ids.sharding)
+        except Exception:
+            pass
+
+        loss = None
         if label is not None:
-            # MICRO-BATCHING (Gradient Accumulation):
-            # We loop over the batch dimension sequentially using jax.lax.scan.
-            # JAX's autodiff natively accumulates the gradients across the scan loop!
-            # This slashes peak memory by a factor of 16x!
-            B = input_ids.shape[0]
-            
-            def scan_batch(carry, i):
-                # Slice a single sequence using JAX-safe dynamic indexing
-                inp = input_ids[i][None, :]
-                lbl = label[i][None, :]
-                
-                x, _ = self.model(inp, state)
-                logits = nnx.remat(self.lm_head)(x)
-                
-                loss_i = compute_loss(logits[:, :-1, :], lbl[:, 1:])
-                return carry, loss_i
-                
-            _, batch_losses = jax.lax.scan(scan_batch, None, jnp.arange(B))
-            
-            loss = jnp.average(batch_losses)
-            logits = jnp.empty((0,)) # Discard logits to save memory
-            
-            # Reset layer_idx for safety
-            if state is not None:
-                state = state.replace(layer_idx=0)
-            
-        else:
-            x, state = self.model(input_ids, state)
-            logits = nnx.remat(self.lm_head)(x)
-            loss = None
-            if state is not None:
-                state = state.replace(layer_idx=0)
+            loss = compute_loss(logits[:, :-1, :], label[:, 1:])
+
+        if state is not None:
+            state = state.replace(layer_idx=0)
 
         return PratchyaOutput(
             logits=logits,
