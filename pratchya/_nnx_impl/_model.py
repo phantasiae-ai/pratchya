@@ -108,12 +108,12 @@ class NQPratchyaModel(nnx.Module):
 
         # CRITICAL MEMORY FIX: 
         # Stack all parameters using nnx.vmap! We MUST stack them to use jax.lax.scan!
-        self.blocks = nnx.vmap(
-            NQRWKVBlock, 
-            in_axes=(None,), 
-            out_axes=0,
-            axis_size=config.n_layers - 1
-        )(config, rngs=rngs)
+        @nnx.split_rngs(splits=config.n_layers - 1)
+        @nnx.vmap(in_axes=(None,), out_axes=0, axis_size=config.n_layers - 1)
+        def create_blocks(cfg):
+            return NQRWKVBlock(cfg, rngs=rngs)
+            
+        self.blocks = create_blocks(config)
 
         self.pre_rmsnorm = NQRMSNorm(
             config.hidden_size,
