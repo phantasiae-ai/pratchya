@@ -107,12 +107,12 @@ class NQPratchyaModel(nnx.Module):
         )
 
         self.init_block = NQRWKVBlock(config, rngs=rngs, layer_idx=0)
-        @nnx.split_rngs(splits=config.n_layers - 1)
-        @nnx.vmap(in_axes=(0,), out_axes=0)
-        def vmap_block(rngs: nnx.Rngs):
-            return NQRWKVBlock(config, rngs=rngs)
         
-        self.blocks = vmap_block(rngs)
+        # CRITICAL MEMORY FIX: Do NOT use nnx.vmap!
+        # vmap stacks all parameters into a single massive 14GB array. 
+        # XLA's partitioner tries to hoist the AllGather of this array, causing a 54GB OOM!
+        # Using a list of independent blocks forces XLA to AllGather layer-by-layer (450MB peak)!
+        self.blocks = [NQRWKVBlock(config, rngs=rngs) for _ in range(config.n_layers - 1)]
 
         self.pre_rmsnorm = NQRMSNorm(
             config.hidden_size,
@@ -139,15 +139,14 @@ class NQPratchyaModel(nnx.Module):
 
         x = nnx.remat(self.pre_rmsnorm)(x)
 
+        # Set layer_idx to 0 for init block
+        state = state.replace(layer_idx=0)
         x, v, state = nnx.remat(self.init_block)(x, None, t_positions, state)
         
-        @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=nnx.Carry)
-        def scan_block(carry, layer):
-            x, v, state = carry
-            x, v, state = nnx.remat(layer)(x, v, t_positions, state)
-            return (x, v, state)
-        
-        x, _, state = scan_block((x, v, state), self.blocks)
+        # Unroll the loop to enforce layer-by-layer rematerialization
+        for i, block in enumerate(self.blocks):
+            state = state.replace(layer_idx=i + 1)
+            x, v, state = nnx.remat(block)(x, v, t_positions, state)
 
         x = nnx.remat(self.final_rmsnorm)(x)
 
