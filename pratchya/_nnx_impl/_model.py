@@ -166,38 +166,26 @@ class NQPratchyaCausalLM(nnx.Module):
     def __call__(
         self, input_ids: jax.Array, 
         label: Optional[jax.Array] = None,
-        *, state: Optional[PratchyaState] = None,
-        logits_sharding = None
+        *, state: Optional[PratchyaState] = None
     ):
-        x, state = self.model(input_ids, state)
         
-        # CRITICAL MEMORY FIX: 
-        # Because lm_head.kernel (674MB) is larger than x (268MB), XLA's greedy cost model 
-        # decides to AllGather x instead of the weights. This creates a 10.8GB partial tensor 
-        # that OOMs the TPU during Softmax!
-        # By forcing the kernel to be fully replicated, XLA must AllGather the weights instead, 
-        # completely bypassing the 10.8GB partial tensor!
-        kernel = self.lm_head.kernel.value
-        try:
-            kernel = jax.lax.with_sharding_constraint(kernel, jax.sharding.PartitionSpec())
-        except Exception:
-            pass
-            
-        logits = (x @ kernel).astype(x.dtype)
-
-        # Fallback constraint for the logits just in case
-        if logits_sharding is not None:
-            try:
-                logits = jax.lax.with_sharding_constraint(logits, logits_sharding)
-            except Exception:
-                pass
+        x, state = self.model(input_ids, state)
 
         loss = None
+        logits = None
         if label is not None:
-            loss = compute_loss(logits[:, :-1, :], label[:, 1:])
+            loss = jnp.array(0., dtype=jnp.bfloat16)
+            B = x.shape[0]
+            for i in range(B):
+                logit_i = self.lm_head(x[i:i+1, :, :])
+                loss = loss + compute_loss(logit_i[:, :-1, :], label[:, 1:])
 
-        if state is not None:
-            state = state.replace(layer_idx=0)
+            loss = loss / B
+        
+        else:
+            logits = self.lm_head(x)
+
+        state = state.replace(layer_idx=0)
 
         return PratchyaOutput(
             logits=logits,
