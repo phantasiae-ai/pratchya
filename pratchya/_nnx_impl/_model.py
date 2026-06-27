@@ -166,21 +166,16 @@ class NQPratchyaCausalLM(nnx.Module):
     def __call__(
         self, input_ids: jax.Array, 
         label: Optional[jax.Array] = None,
-        *, state: Optional[PratchyaState] = None
+        *, state: Optional[PratchyaState] = None,
+        logits_sharding = None
     ):
         x, state = self.model(input_ids, state)
         logits = nnx.remat(self.lm_head)(x)
 
         # CRITICAL MEMORY FIX: 
-        # The lm_head matmul creates a 10.8GB logits tensor. By default, XLA AllReduces this 
-        # into a FULLY REPLICATED tensor on every TPU. When it runs Softmax for the loss, 
-        # it generates 43GB of replicated temporaries and instantly OOMs!
-        # By constraining logits to match the batch sharding of input_ids, XLA uses ReduceScatter 
-        # instead, shrinking the temporaries to a tiny 1.3GB per device!
-        try:
-            logits = jax.lax.with_sharding_constraint(logits, input_ids.sharding)
-        except Exception:
-            pass
+        # Apply the explicitly passed sharding constraint to prevent 43GB Softmax OOM!
+        if logits_sharding is not None:
+            logits = jax.lax.with_sharding_constraint(logits, logits_sharding)
 
         loss = None
         if label is not None:
