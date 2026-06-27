@@ -106,14 +106,13 @@ class NQPratchyaModel(nnx.Module):
             rngs=rngs, dtype=config.language_dtype
         )
 
-        # CRITICAL MEMORY FIX: 
-        # Stack all parameters using nnx.vmap! We MUST stack them to use jax.lax.scan!
+        self.init_block = RWKVBlock(config, rngs=rngs, layer_idx=0)
         @nnx.split_rngs(splits=config.n_layers - 1)
-        @nnx.vmap(in_axes=(None,), out_axes=0, axis_size=config.n_layers - 1)
-        def create_blocks(cfg):
-            return NQRWKVBlock(cfg, rngs=rngs)
-            
-        self.blocks = create_blocks(config)
+        @nnx.vmap(in_axes=(0,), out_axes=0)
+        def vmap_block(rngs: nnx.Rngs):
+            return RWKVBlock(config, rngs=rngs)
+        
+        self.blocks = vmap_block(rngs)
 
         self.pre_rmsnorm = NQRMSNorm(
             config.hidden_size,
@@ -144,36 +143,13 @@ class NQPratchyaModel(nnx.Module):
         state = state.replace(layer_idx=0)
         x, v, state = nnx.remat(self.init_block)(x, None, t_positions, state)
         
-        # CRITICAL MEMORY FIX: Force sequential FSDP AllGathers using jax.lax.scan!
-        # A Python for-loop allows XLA to hoist all 31 AllGathers to the top (51GB OOM).
-        # jax.lax.scan compiles a SINGLE layer loop body, physically preventing XLA from hoisting!
-        blocks_graph, blocks_state = nnx.split(self.blocks)
-        layer_indices = jnp.arange(1, self.config.n_layers)
-        
-        def scan_fn(carry, scanned_inputs):
+        @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=nnx.Carry)
+        def scan_block(carry, layer):
             x, v, state = carry
-            block_state_slice, idx = scanned_inputs
-            
-            # Reconstruct the single block from the state slice
-            block = nnx.merge(blocks_graph, block_state_slice)
-            
-            state = state.replace(layer_idx=idx)
-            x, v, state = nnx.remat(block)(x, v, t_positions, state)
-            
-            # Extract the updated state slice (gradients will route perfectly!)
-            _, new_block_state_slice = nnx.split(block)
-            
-            return (x, v, state), new_block_state_slice
-
-        # Scan over the stacked blocks_state and layer_indices
-        (x, v, state), updated_blocks_state = jax.lax.scan(
-            scan_fn, 
-            (x, v, state), 
-            (blocks_state, layer_indices)
-        )
+            x, v, state = layer(x, v, t_positions, state)
+            return (x, v, state)
         
-        # Update the module's state with the scanned updates
-        nnx.update(self.blocks, updated_blocks_state)
+        x, _, state = scan_block((x, v, state), self.blocks)
 
         x = nnx.remat(self.final_rmsnorm)(x)
 
