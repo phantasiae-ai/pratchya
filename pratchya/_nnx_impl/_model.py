@@ -177,9 +177,9 @@ class NQPratchyaCausalLM(nnx.Module):
             B = input_ids.shape[0]
             
             def scan_batch(carry, i):
-                # Slice a single sequence
-                inp = input_ids[i:i+1]
-                lbl = label[i:i+1]
+                # Slice a single sequence using JAX-safe dynamic indexing
+                inp = input_ids[i][None, :]
+                lbl = label[i][None, :]
                 
                 x, _ = self.model(inp, state)
                 logits = nnx.remat(self.lm_head)(x)
