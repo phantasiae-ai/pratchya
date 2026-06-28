@@ -126,7 +126,7 @@ class NQPratchyaModel(nnx.Module):
 
         self.config = config
 
-    def __call__(self, input_ids: jax.Array, state: PratchyaState):
+    def __call__(self, input_ids: jax.Array, state: PratchyaState, logits_sharding=None):
 
         B, T = input_ids.shape
 
@@ -143,14 +143,26 @@ class NQPratchyaModel(nnx.Module):
         state = state.replace(layer_idx=0)
         x, v, state = nnx.remat(self.init_block)(x, None, t_positions, state)
         
-        @nnx.scan(in_axes=(nnx.Carry, 0), out_axes=nnx.Carry)
+        layer_indices = jnp.arange(1, self.config.n_layers)
+
+        @nnx.scan(in_axes=(nnx.Carry, 0, 0), out_axes=nnx.Carry)
         @nnx.remat
-        def scan_block(carry, layer):
+        def scan_block(carry, layer, idx):
             x, v, state = carry
+            state = state.replace(layer_idx=idx)
+            
+            # COMPILER BARRIER: Shard the intermediate activations!
+            # This anchors the FSDP computation locally and prevents XLA from hoisting
+            # the AllGathers for the 56GB weights out of the loop.
+            if logits_sharding is not None:
+                x = jax.lax.with_sharding_constraint(x, logits_sharding)
+                if v is not None:
+                    v = jax.lax.with_sharding_constraint(v, logits_sharding)
+                    
             x, v, state = layer(x, v, t_positions, state)
             return (x, v, state)
         
-        x, _, state = scan_block((x, v, state), self.blocks)
+        x, _, state = scan_block((x, v, state), self.blocks, layer_indices)
 
         x = nnx.remat(self.final_rmsnorm)(x)
 
@@ -173,7 +185,7 @@ class NQPratchyaCausalLM(nnx.Module):
         *, state: Optional[PratchyaState] = None,
         logits_sharding = None
     ):
-        x, state = self.model(input_ids, state)
+        x, state = self.model(input_ids, state, logits_sharding=logits_sharding)
         
         kernel = self.lm_head.kernel.value
         if logits_sharding is not None:

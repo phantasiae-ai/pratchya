@@ -367,22 +367,8 @@ class NQLinear(nnx.Module):
         kernel = kernel_init(rngs.params(), (in_features, out_features), dtype)
         self.kernel = nnx.Param(kernel)
 
-        def get_blksize(f: int) -> int:
-            if f <= 0: return 1
-            return min(128, f & -f)
-            
-        self.blksize_in = get_blksize(in_features)
-        self.blksize_out = get_blksize(out_features)
-
     def __call__(self, x: jax.Array):
         dtype = x.dtype
-        # tgrid_w = (self.blksize_in, self.blksize_out)
-        # tgrid_x = (1, self.blksize_in)
-
-        # x_q = QArrayImpl(x, tgrid_x)
-        # w_q = QArrayImpl(self.kernel, tgrid_w)
-
-        # return (x_q @ w_q).astype(dtype)
         return (x @ self.kernel).astype(dtype)
     
 
